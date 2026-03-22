@@ -1,0 +1,29 @@
+# Core ML
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# YOLO
+ultralytics>=8.1.0
+
+# nuScenes
+nuscenes-devkit>=1.1.11
+
+# 3D perception
+pyquaternion>=0.9.9
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Utilities
+numpy>=1.24.0
+scipy>=1.11.0
+Pillow>=10.0.0
+tqdm>=4.66.0
+pyyaml>=6.0
+tensorboard>=2.15.0
+
+# Code quality
+black>=23.0.0
+ruff>=0.1.0

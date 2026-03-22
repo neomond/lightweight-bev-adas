@@ -1,0 +1,37 @@
+# Student model configuration
+model:
+  yolo_model: "yolo11n.pt"
+  lidar_channels: 64
+  camera_bev_channels: 256
+  fused_channels: 256
+  num_classes: 10
+
+# Data
+data:
+  dataset: "nuscenes"
+  version: "v1.0-mini"    # Change to v1.0-trainval for full training
+  dataroot: "data/nuscenes"
+  x_range: [-50.0, 50.0]
+  y_range: [-50.0, 50.0]
+  bev_resolution: 0.5
+
+# Knowledge distillation
+distillation:
+  teacher: "bevfusion"
+  alpha: 1.0              # Feature-level KD weight
+  beta: 0.5               # Logit-level KD weight
+  teacher_checkpoint: "checkpoints/bevfusion_pretrained.pth"
+
+# Training
+training:
+  epochs: 20
+  batch_size: 2
+  lr: 0.0002
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 1
+
+# Evaluation
+eval:
+  metrics: ["mAP", "NDS"]
+  benchmarks: ["nuscenes", "kitti"]
