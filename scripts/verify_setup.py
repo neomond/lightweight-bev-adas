@@ -55,7 +55,7 @@ def main():
     # 5. Losses
     print("\n[5] Testing distillation losses...")
     from src.losses.distillation import CombinedKDLoss
-    kd_loss = CombinedKDLoss()
+    kd_loss = CombinedKDLoss() 
     student_out = {"fused_bev": fused, "detections": det}
     teacher_out = {
         "fused_bev": torch.randn_like(fused),

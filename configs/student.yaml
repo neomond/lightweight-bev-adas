@@ -1,4 +1,4 @@
-# Student model configuration
+# Student model configuration - ALL HYPERPARAMETERS
 model:
   yolo_model: "yolo11n.pt"
   lidar_channels: 64

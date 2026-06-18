@@ -64,7 +64,7 @@ class StudentBEV(nn.Module):
             features = self.camera_backbone(camera_images[:, i])
             cam_features_list.append(features)
 
-        # TODO (Milestone 2): Camera-to-BEV view transformation
+        # TODO (Milestone 2): Camera-to-BEV view transformation (add a module (like LSS - Lift, Splat, Shoot))
         # For now, use a placeholder
         camera_bev = torch.zeros(B, 256, 50, 50, device=camera_images.device)
 
