@@ -12,7 +12,7 @@ venv/
 env/
 
 # Data (too large for git)
-data/
+/data/
 checkpoints/
 outputs/
 logs/
