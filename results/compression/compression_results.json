@@ -1,0 +1,62 @@
+[
+  {
+    "variant": "FP32 (baseline)",
+    "params": 5516979,
+    "nonzero": 5516979,
+    "size_mb": 22.235558,
+    "fps": 0.52,
+    "latency_ms": 1923.67,
+    "val_loss": 0.6622,
+    "reduction": "1.0\u00d7"
+  },
+  {
+    "variant": "FP16",
+    "params": 5516979,
+    "nonzero": 5516979,
+    "size_mb": 11.2,
+    "fps": "N/A",
+    "latency_ms": "N/A",
+    "val_loss": "N/A (half precision)",
+    "reduction": "2.0\u00d7"
+  },
+  {
+    "variant": "INT8 Dynamic (theoretical)",
+    "params": 5516979,
+    "nonzero": 5516979,
+    "size_mb": 5.6,
+    "fps": "N/A",
+    "latency_ms": "N/A",
+    "val_loss": "N/A",
+    "reduction": "4.0x"
+  },
+  {
+    "variant": "Pruned 20% + fine-tune 2ep",
+    "params": 5516979,
+    "nonzero": 5033135,
+    "size_mb": 22.2,
+    "fps": 0.52,
+    "latency_ms": 1908.99,
+    "val_loss": 0.828,
+    "reduction": "1.0\u00d7"
+  },
+  {
+    "variant": "Pruned 40% + fine-tune 2ep",
+    "params": 5516979,
+    "nonzero": 4549039,
+    "size_mb": 22.2,
+    "fps": 0.52,
+    "latency_ms": 1913.93,
+    "val_loss": 1.1159,
+    "reduction": "1.0\u00d7"
+  },
+  {
+    "variant": "Pruned 60% + fine-tune 2ep",
+    "params": 5516979,
+    "nonzero": 4065199,
+    "size_mb": 22.2,
+    "fps": 0.51,
+    "latency_ms": 1979.45,
+    "val_loss": 1.1719,
+    "reduction": "1.0\u00d7"
+  }
+]

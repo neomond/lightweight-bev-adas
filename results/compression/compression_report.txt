@@ -1,0 +1,11 @@
+Compression Pipeline Report
+================================================================================
+
+Variant                                FPS      MS      MB   ValLoss  Reduction
+--------------------------------------------------------------------------------
+FP32 (baseline)                       0.52 1923.67 22.235558    0.6622       1.0×
+FP16                                   N/A     N/A    11.2 N/A (half precision)       2.0×
+INT8 Dynamic (theoretical)             N/A     N/A     5.6       N/A       4.0x
+Pruned 20% + fine-tune 2ep            0.52 1908.99    22.2    0.8280       1.0×
+Pruned 40% + fine-tune 2ep            0.52 1913.93    22.2    1.1159       1.0×
+Pruned 60% + fine-tune 2ep            0.51 1979.45    22.2    1.1719       1.0×
