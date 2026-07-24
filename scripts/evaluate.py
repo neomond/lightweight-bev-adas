@@ -295,6 +295,9 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.evaluate import DetectionEval
 
+        import nuscenes.eval.common.loaders as nusc_loaders
+        nusc_loaders._get_box_class_field = lambda eval_boxes: 'detection_name'
+
         data_cfg = config['data']
         nusc = NuScenes(
             version=data_cfg['version'],
@@ -330,6 +333,8 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
             json.dump(pred_data, pf)
 
         print(f'  Filtered to {len(pred_data["results"])} val tokens for evaluator')
+
+        
 
         nusc_eval = DetectionEval(
             nusc,
