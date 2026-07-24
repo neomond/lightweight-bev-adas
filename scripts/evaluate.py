@@ -293,7 +293,7 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
     try:
         from nuscenes import NuScenes
         from nuscenes.eval.detection.config import config_factory
-        from nuscenes.eval.detection.evaluate import NuScenesEval
+        from nuscenes.eval.detection.evaluate import DetectionEval
 
         data_cfg = config['data']
         nusc = NuScenes(
@@ -331,7 +331,7 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
 
         print(f'  Filtered to {len(pred_data["results"])} val tokens for evaluator')
 
-        nusc_eval = NuScenesEval(
+        nusc_eval = DetectionEval(
             nusc,
             config=eval_cfg,
             result_path=str(pred_file),
@@ -339,21 +339,18 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
             output_dir=str(output_dir),
             verbose=False,
         )
-        metrics, _ = nusc_eval.evaluate()
-
-        map_score = round(metrics.nd_score, 4)
-        nds_score = round(metrics.mean_dist_aps['car'] if hasattr(metrics, 'mean_dist_aps') else 0.0, 4)
+        metrics_summary = nusc_eval.main(render_curves=False)
 
         # Extract per-class AP
         per_class = {}
-        if hasattr(metrics, 'mean_ap_dist'):
+        if 'mean_dist_aps' in metrics_summary:
             for cls in CLASS_NAMES:
-                if cls in metrics.mean_ap_dist:
-                    per_class[cls] = round(metrics.mean_ap_dist[cls], 4)
+                if cls in metrics_summary['mean_dist_aps']:
+                    per_class[cls] = round(metrics_summary['mean_dist_aps'][cls], 4)
 
         return {
-            'mAP': round(metrics.mean_ap, 4) if hasattr(metrics, 'mean_ap') else map_score,
-            'NDS': round(metrics.nd_score, 4),
+            'mAP': round(metrics_summary['mean_ap'], 4),
+            'NDS': round(metrics_summary['nd_score'], 4),
             'per_class_AP': per_class,
         }
 
