@@ -355,6 +355,8 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f'  nuScenes evaluator failed: {e}')
         print('  Returning placeholder metrics — check predictions.json manually')
         return {'mAP': None, 'NDS': None, 'per_class_AP': {}, 'error': str(e)}
