@@ -172,14 +172,14 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
     """
     Compute mAP and NDS using nuScenes official evaluator.
 
-    The nuScenes evaluator expects predictions in a specific JSON format.
-    We run inference on the val set, convert predictions to that format,
-    then call the evaluator.
-
-    Note: With nuScenes mini (80 val samples), mAP/NDS values will be
-    lower and noisier than full val set results. Report these as
-    'mini-val' metrics to set correct expectations in the dissertation.
+    Predicted boxes are produced in ego-vehicle frame (relative to the car),
+    but nuScenes' evaluator expects box translations/rotations in global
+    map frame. We transform each box using that sample's ego_pose before
+    saving predictions.
     """
+    from nuscenes import NuScenes
+    from pyquaternion import Quaternion
+
     model.eval()
 
     x_range = tuple(config['data']['x_range'])
@@ -188,13 +188,11 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
     y_min, y_max = y_range
     bev_h = bev_w = 50
 
-    # nuScenes class names in order matching our 10-class head
     CLASS_NAMES = [
         'car', 'truck', 'bus', 'trailer', 'construction_vehicle',
         'pedestrian', 'motorcycle', 'bicycle', 'traffic_cone', 'barrier'
     ]
 
-    # nuScenes attribute defaults per class (required by evaluator)
     CLASS_ATTRS = {
         'car':                   'vehicle.moving',
         'truck':                 'vehicle.moving',
@@ -208,6 +206,34 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
         'barrier':               '',
     }
 
+    # Load NuScenes up front so we can look up ego_pose per sample during inference
+    data_cfg = config['data']
+    nusc = NuScenes(
+        version=data_cfg['version'],
+        dataroot=data_cfg['dataroot'],
+        verbose=False,
+    )
+
+    def ego_to_global(token, x, y, z, yaw):
+        """Transform a box from ego-vehicle frame to global map frame."""
+        sample = nusc.get('sample', token)
+        lidar_sd_token = sample['data']['LIDAR_TOP']
+        sd = nusc.get('sample_data', lidar_sd_token)
+        ego_pose = nusc.get('ego_pose', sd['ego_pose_token'])
+
+        ego_rotation = Quaternion(ego_pose['rotation'])
+        ego_translation = np.array(ego_pose['translation'])
+
+        # Rotate + translate the box centre into global frame
+        point_ego = np.array([x, y, z])
+        point_global = ego_rotation.rotate(point_ego) + ego_translation
+
+        # Compose the box's yaw rotation with the ego rotation
+        box_rotation_ego = Quaternion(axis=[0, 0, 1], angle=yaw)
+        box_rotation_global = ego_rotation * box_rotation_ego
+
+        return point_global, box_rotation_global
+
     predictions = []
 
     print('Running inference on val set...')
@@ -219,29 +245,26 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
             sample_tokens  = batch['sample_tokens']
 
             outputs = model(camera_images, lidar_points, calibration)
-            heatmap    = outputs['detections']['heatmap']     # (B,10,50,50)
-            regression = outputs['detections']['regression']  # (B,8,50,50)
+            heatmap    = outputs['detections']['heatmap']
+            regression = outputs['detections']['regression']
 
             B = heatmap.shape[0]
             for b in range(B):
                 token = sample_tokens[b]
-                hm_b  = heatmap[b].cpu().numpy()     # (10,50,50)
-                reg_b = regression[b].cpu().numpy()  # (8,50,50)
+                hm_b  = heatmap[b].cpu().numpy()
+                reg_b = regression[b].cpu().numpy()
 
-                # Find peaks in heatmap above threshold
                 for cls_idx, cls_name in enumerate(CLASS_NAMES):
-                    cls_hm = hm_b[cls_idx]  # (50,50)
-                    # Simple peak finding: cells above 0.2 threshold
+                    cls_hm = hm_b[cls_idx]
                     rows, cols = np.where(cls_hm > 0.2)
 
                     for r, c in zip(rows, cols):
                         score = float(cls_hm[r, c])
 
-                        # Convert BEV grid coords back to ego-frame metres
-                        x = (c + 0.5) / bev_w * (x_max - x_min) + x_min
-                        y = (r + 0.5) / bev_h * (y_max - y_min) + y_min
+                        # BEV grid -> ego-frame metres
+                        x_ego = (c + 0.5) / bev_w * (x_max - x_min) + x_min
+                        y_ego = (r + 0.5) / bev_h * (y_max - y_min) + y_min
 
-                        # Regression outputs at this cell
                         dz       = float(reg_b[0, r, c])
                         w        = max(float(reg_b[3, r, c]), 0.1)
                         l        = max(float(reg_b[4, r, c]), 0.1)
@@ -249,17 +272,22 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
                         sin_yaw  = float(reg_b[6, r, c])
                         cos_yaw  = float(reg_b[7, r, c])
                         yaw      = float(np.arctan2(sin_yaw, cos_yaw))
-                        z        = dz
+                        z_ego    = dz
+
+                        # Transform ego-frame box -> global frame
+                        point_global, rot_global = ego_to_global(
+                            token, x_ego, y_ego, z_ego, yaw
+                        )
 
                         attr = CLASS_ATTRS[cls_name]
 
                         pred = {
                             'sample_token':        token,
-                            'translation':         [x, y, z],
+                            'translation':         point_global.tolist(),
                             'size':                [w, l, h],
                             'rotation':            [
-                                float(np.cos(yaw / 2)), 0.0, 0.0,
-                                float(np.sin(yaw / 2))
+                                rot_global.w, rot_global.x,
+                                rot_global.y, rot_global.z
                             ],
                             'velocity':            [0.0, 0.0],
                             'detection_name':      cls_name,
@@ -291,25 +319,15 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
 
     # Run nuScenes evaluator
     try:
-        from nuscenes import NuScenes
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.evaluate import DetectionEval
 
         import nuscenes.eval.common.loaders as nusc_loaders
         nusc_loaders._get_box_class_field = lambda eval_boxes: 'detection_name'
 
-        data_cfg = config['data']
-        nusc = NuScenes(
-            version=data_cfg['version'],
-            dataroot=data_cfg['dataroot'],
-            verbose=False,
-        )
         eval_cfg = config_factory('detection_cvpr_2019')
-
-        # Determine correct eval split name
         eval_split = 'mini_val' if 'mini' in data_cfg.get('version', '') else 'val'
 
-        # Get exact tokens the evaluator expects for this split
         from nuscenes.utils.splits import create_splits_scenes
         val_scene_names = set(create_splits_scenes().get(eval_split, []))
         val_tokens = set(
@@ -317,24 +335,19 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
             if nusc.get('scene', s['scene_token'])['name'] in val_scene_names
         )
 
-        # Fill missing val tokens with empty predictions
         for tok in val_tokens:
             if tok not in pred_data['results']:
                 pred_data['results'][tok] = []
 
-        # Remove tokens NOT in val split (evaluator rejects extra tokens)
         pred_data['results'] = {
             tok: v for tok, v in pred_data['results'].items()
             if tok in val_tokens
         }
 
-        # Re-save filtered predictions
         with open(pred_file, 'w') as pf:
             json.dump(pred_data, pf)
 
         print(f'  Filtered to {len(pred_data["results"])} val tokens for evaluator')
-
-        
 
         nusc_eval = DetectionEval(
             nusc,
@@ -346,7 +359,6 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
         )
         metrics_summary = nusc_eval.main(render_curves=False)
 
-        # Extract per-class AP
         per_class = {}
         if 'mean_dist_aps' in metrics_summary:
             for cls in CLASS_NAMES:
@@ -365,7 +377,6 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
         print(f'  nuScenes evaluator failed: {e}')
         print('  Returning placeholder metrics — check predictions.json manually')
         return {'mAP': None, 'NDS': None, 'per_class_AP': {}, 'error': str(e)}
-
 
 # ── Model size ────────────────────────────────────────────────────────────────
 
