@@ -48,17 +48,20 @@ class NuScenesDataset(Dataset):
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.samples = self._get_samples(split)
         print(f"Loaded {len(self.samples)} samples ({split} split)")
-
+    
     def _get_samples(self, split):
-        scenes = self.nusc.scene
-        if "mini" in self.nusc.version:
-            scene_names = [
-                s["name"] for s in (scenes[:8] if split == "train" else scenes[8:])
-            ]
-        else:
-            from nuscenes.utils.splits import create_splits_scenes
+        from nuscenes.utils.splits import create_splits_scenes
 
-            scene_names = create_splits_scenes().get(split, [])
+        # Use nuScenes' official scene-based split for both mini and full
+        # versions, so train/val composition matches the standard evaluation
+        # protocol (required for mAP/NDS to work correctly).
+        if "mini" in self.nusc.version:
+            split_key = f"mini_{split}" if split in ("train", "val") else split
+        else:
+            split_key = split
+
+        scene_names = set(create_splits_scenes().get(split_key, []))
+
         samples = []
         for scene in self.nusc.scene:
             if scene["name"] in scene_names:
