@@ -486,8 +486,35 @@ def main():
     # Detection metrics
     if not args.skip_metrics:
         print('\n[4/4] Computing mAP / NDS...')
+
+        # NuScenesEval/DetectionEval internally validates predictions against
+        # nuScenes' OFFICIAL mini_val split. Our val_loader above uses a
+        # custom last-2-scenes split (for training/loss curves), which does
+        # NOT match the official mini_val scene set -> zero token overlap ->
+        # mAP/NDS silently computed as 0.0. Build a separate loader here
+        # over the official split, reusing the already-loaded NuScenes API
+        # object (no extra reload cost).
+        import copy
+        from nuscenes.utils.splits import create_splits_scenes
+        official_val_scene_names = set(create_splits_scenes().get('mini_val', []))
+        official_tokens = []
+        for scene in val_dataset.nusc.scene:
+            if scene['name'] in official_val_scene_names:
+                token = scene['first_sample_token']
+                while token:
+                    official_tokens.append(token)
+                    token = val_dataset.nusc.get('sample', token)['next']
+
+        official_val_dataset = copy.copy(val_dataset)
+        official_val_dataset.samples = official_tokens
+        official_val_loader = DataLoader(
+            official_val_dataset, batch_size=1, shuffle=False,
+            num_workers=args.workers, collate_fn=collate_fn,
+        )
+        print(f'  Using official mini_val split: {len(official_tokens)} samples')
+
         det_metrics = compute_detection_metrics(
-            model, val_loader, device, config, output_dir
+            model, official_val_loader, device, config, output_dir
         )
         results.update(det_metrics)
         if results.get('mAP') is not None:
