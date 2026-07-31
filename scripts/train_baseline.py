@@ -155,9 +155,61 @@ def build_heatmap_targets(
     return heatmaps
 
 
+def build_regression_targets(
+    annotations: list,
+    bev_h: int,
+    bev_w: int,
+    x_range: tuple,
+    y_range: tuple,
+    device: torch.device,
+) -> tuple:
+    """Build dense regression targets + positive-cell mask.
+
+    Returns:
+        reg_targets: (B, 8, bev_h, bev_w) — dx, dy, dz, log_w, log_l, log_h, sin_yaw, cos_yaw
+        pos_mask:    (B, bev_h, bev_w) bool — True where a real box's center lands
+    """
+    B = len(annotations)
+    reg_targets = torch.zeros(B, 8, bev_h, bev_w, device=device)
+    pos_mask = torch.zeros(B, bev_h, bev_w, dtype=torch.bool, device=device)
+
+    x_min, x_max = x_range
+    y_min, y_max = y_range
+    x_scale = bev_w / (x_max - x_min)
+    y_scale = bev_h / (y_max - y_min)
+
+    for b, ann in enumerate(annotations):
+        boxes = ann["boxes"].to(dtype=torch.float32, device=device)  # (M,7): x,y,z,w,l,h,yaw
+        if boxes.shape[0] == 0:
+            continue
+
+        for i in range(boxes.shape[0]):
+            x, y, z, w, l, h, yaw = boxes[i]
+            cx = (x - x_min) * x_scale
+            cy = (y - y_min) * y_scale
+            col, row = int(cx), int(cy)
+            if not (0 <= col < bev_w and 0 <= row < bev_h):
+                continue
+
+            dx = cx - col   # sub-cell offset, in [0,1)
+            dy = cy - row
+
+            reg_targets[b, 0, row, col] = dx
+            reg_targets[b, 1, row, col] = dy
+            reg_targets[b, 2, row, col] = z
+            reg_targets[b, 3, row, col] = torch.log(w.clamp(min=1e-3))
+            reg_targets[b, 4, row, col] = torch.log(l.clamp(min=1e-3))
+            reg_targets[b, 5, row, col] = torch.log(h.clamp(min=1e-3))
+            reg_targets[b, 6, row, col] = torch.sin(yaw)
+            reg_targets[b, 7, row, col] = torch.cos(yaw)
+            pos_mask[b, row, col] = True
+
+    return reg_targets, pos_mask
+
+
 def detection_loss(
-    pred_heatmap: torch.Tensor,     # (B, C, H, W)
-    pred_reg:     torch.Tensor,     # (B, 8, H, W)
+    pred_heatmap: torch.Tensor,
+    pred_reg:     torch.Tensor,
     annotations:  list,
     x_range:      tuple,
     y_range:      tuple,
@@ -165,34 +217,23 @@ def detection_loss(
     reg_weight:   float = 2.0,
     device:       torch.device = None,
 ) -> tuple:
-    """Compute total detection loss.
-
-    Returns:
-        total_loss, heatmap_loss, reg_loss  (all scalars)
-    """
     B, C, H, W = pred_heatmap.shape
     device = pred_heatmap.device
 
-    # ── Heatmap loss ──────────────────────────────────────────────────────
-    gt_heatmap = build_heatmap_targets(
-        annotations, C, H, W, x_range, y_range, device
-    )
+    # Heatmap loss — unchanged
+    gt_heatmap = build_heatmap_targets(annotations, C, H, W, x_range, y_range, device)
     loss_hm = focal_loss_fn(pred_heatmap, gt_heatmap)
 
-    # ── Regression loss ───────────────────────────────────────────────────
-    # Mask: only compute regression loss at positive (foreground) cells
-    pos_mask = gt_heatmap.max(dim=1)[0] > 0.5   # (B, H, W)
+    # ── Regression loss — NOW USES REAL TARGETS ───────────────────────────
+    reg_targets, pos_mask = build_regression_targets(
+        annotations, H, W, x_range, y_range, device
+    )
     n_pos = pos_mask.sum().clamp(min=1)
 
     if pos_mask.sum() > 0:
-        # pred_reg at positive locations: (N_pos, 8)
-        pred_at_pos = pred_reg.permute(0, 2, 3, 1)[pos_mask]   # (N_pos, 8)
-        # For regression targets, we use zero as a simple placeholder.
-        # In Milestone 4 (full training) this will be replaced with real
-        # box regression targets (dx, dy, dz, log_w, log_l, log_h, sin, cos).
-        # The heatmap loss still drives learning meaningfully at this stage.
-        reg_target = torch.zeros_like(pred_at_pos)
-        loss_reg = F.l1_loss(pred_at_pos, reg_target, reduction="sum") / n_pos
+        pred_at_pos   = pred_reg.permute(0, 2, 3, 1)[pos_mask]     # (N_pos, 8)
+        target_at_pos = reg_targets.permute(0, 2, 3, 1)[pos_mask]  # (N_pos, 8)
+        loss_reg = F.l1_loss(pred_at_pos, target_at_pos, reduction="sum") / n_pos
     else:
         loss_reg = torch.tensor(0.0, device=device, requires_grad=True)
 
