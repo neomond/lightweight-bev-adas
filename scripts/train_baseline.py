@@ -376,6 +376,7 @@ def main():
     parser.add_argument("--workers", type=int,   default=2)
     parser.add_argument("--run-name", default="baseline", help="Name for logs/checkpoints")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
     set_seed(args.seed)
     
@@ -457,6 +458,25 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0)
 
+    # ── Resume ────────────────────────────────────────────────────────────
+    start_epoch = 1
+    best_val_loss = float("inf")
+    global_step = 0
+    history = []
+
+    if args.resume and Path(args.resume).exists():
+        print(f"Resuming from checkpoint: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state"])
+        if "optim_state" in ckpt:
+            optimizer.load_state_dict(ckpt["optim_state"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt.get("val_loss", float("inf"))
+        for _ in range(ckpt["epoch"]):
+            scheduler.step()
+        print(f"  Resumed at epoch {ckpt['epoch']}  (val_loss: {best_val_loss:.4f})")
+        print(f"  Continuing from epoch {start_epoch}\n")
+
     # ── Logging & Checkpointing ───────────────────────────────────────────
     log_dir  = Path("logs") / args.run_name
     ckpt_dir = Path("checkpoints")
@@ -467,12 +487,8 @@ def main():
     print(f"TensorBoard logs → {log_dir}")
     print(f"Checkpoints      → {ckpt_dir}\n")
 
-    best_val_loss = float("inf")
-    global_step   = 0
-    history       = []
-
     # ── Training Loop ─────────────────────────────────────────────────────
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         print(f"\nEpoch {epoch}/{epochs}  (lr={optimizer.param_groups[0]['lr']:.6f})")
         print("-" * 60)
 
