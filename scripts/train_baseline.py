@@ -353,6 +353,18 @@ def validate(model, loader, focal_loss_fn, device, config):
     return total_loss_sum / max(n_batches, 1)
 
 
+def set_seed(seed: int):
+    """Set all relevant random seeds for reproducibility across a run."""
+    import random
+    import numpy as np
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    print(f"Seed set to {seed}")
+
+    
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -363,7 +375,10 @@ def main():
     parser.add_argument("--lr",      type=float, default=None, help="Override learning rate")
     parser.add_argument("--workers", type=int,   default=2)
     parser.add_argument("--run-name", default="baseline", help="Name for logs/checkpoints")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+    set_seed(args.seed)
+    
 
     # ── Load config ────────────────────────────────────────────────────────
     with open(args.config) as f:
@@ -385,7 +400,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"  Baseline Training (no KD)  —  {args.run_name}")
     print(f"  Device:  {device}")
-    print(f"  Epochs:  {epochs}  |  Batch: {batch_size}  |  LR: {lr}")
+    print(f"  Epochs:  {epochs}  |  Batch: {batch_size}  |  LR: {lr}  |  Seed: {args.seed}")
     print(f"{'='*60}\n")
 
     # ── Datasets ──────────────────────────────────────────────────────────
