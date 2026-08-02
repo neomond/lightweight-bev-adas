@@ -59,20 +59,15 @@ from torch.utils.data import DataLoader
 # ── FLOPs counter ─────────────────────────────────────────────────────────────
 
 def count_flops(model, sample_batch, device):
-    """Estimate GFLOPs for one forward pass using hook-based counting.
-
-    Falls back to parameter-count estimate if torchinfo not available.
-    """
     try:
         from torchinfo import summary as torch_summary
         camera_images = sample_batch['camera_images'][:1].to(device)
         lidar_points  = sample_batch['lidar_points'][:1].to(device)
-        calibration   = sample_batch['calibration'][:1]
+        calibration   = sample_batch['calibration'][:1]  # already available here!
 
-        # torchinfo can't handle dict outputs cleanly so we wrap
         class Wrapper(nn.Module):
             def __init__(self, m): super().__init__(); self.m = m
-            def forward(self, cam, lid): return self.m(cam, lid, None)
+            def forward(self, cam, lid): return self.m(cam, lid, calibration)  # use real calibration
 
         info = torch_summary(
             Wrapper(model),
@@ -81,12 +76,10 @@ def count_flops(model, sample_batch, device):
         )
         gflops = info.total_mult_adds / 1e9
         return round(gflops, 2)
-    except Exception:
-        # Fallback: rough estimate from parameter count
-        # ~2 FLOPs per parameter per forward pass (multiply-accumulate)
+    except Exception as e:
+        print(f'  ⚠️  torchinfo failed ({e}), using fallback estimate')
         params = sum(p.numel() for p in model.parameters())
         return round(params * 2 / 1e9, 2)
-
 
 # ── Speed benchmark ───────────────────────────────────────────────────────────
 
@@ -226,7 +219,7 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
 
         # Rotate + translate the box centre into global frame
         point_ego = np.array([x, y, z])
-        point_global = ego_rotation.rotate(point_ego) + ego_translation
+        point_global = np.asarray(ego_rotation.rotate(point_ego) + ego_translation)
 
         # Compose the box's yaw rotation with the ego rotation
         box_rotation_ego = Quaternion(axis=[0, 0, 1], angle=yaw)
@@ -261,18 +254,20 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
                     for r, c in zip(rows, cols):
                         score = float(cls_hm[r, c])
 
-                        # BEV grid -> ego-frame metres
-                        x_ego = (c + 0.5) / bev_w * (x_max - x_min) + x_min
-                        y_ego = (r + 0.5) / bev_h * (y_max - y_min) + y_min
-
-                        dz       = float(reg_b[0, r, c])
-                        w        = max(float(reg_b[3, r, c]), 0.1)
-                        l        = max(float(reg_b[4, r, c]), 0.1)
-                        h        = max(float(reg_b[5, r, c]), 0.5)
+                        dx       = float(reg_b[0, r, c])
+                        dy       = float(reg_b[1, r, c])
+                        z        = float(reg_b[2, r, c])
+                        w        = max(float(np.exp(reg_b[3, r, c])), 0.1)
+                        l        = max(float(np.exp(reg_b[4, r, c])), 0.1)
+                        h        = max(float(np.exp(reg_b[5, r, c])), 0.5)
                         sin_yaw  = float(reg_b[6, r, c])
                         cos_yaw  = float(reg_b[7, r, c])
                         yaw      = float(np.arctan2(sin_yaw, cos_yaw))
-                        z_ego    = dz
+
+                        # BEV grid -> ego-frame metres, using the learned sub-cell offset
+                        x_ego = (c + dx) / bev_w * (x_max - x_min) + x_min
+                        y_ego = (r + dy) / bev_h * (y_max - y_min) + y_min
+                        z_ego = z
 
                         # Transform ego-frame box -> global frame
                         point_global, rot_global = ego_to_global(
