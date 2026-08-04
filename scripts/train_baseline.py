@@ -459,6 +459,7 @@ def main():
     focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0)
 
     # ── Resume ────────────────────────────────────────────────────────────
+    # ── Resume ────────────────────────────────────────────────────────────
     start_epoch = 1
     best_val_loss = float("inf")
     global_step = 0
@@ -471,10 +472,22 @@ def main():
         if "optim_state" in ckpt:
             optimizer.load_state_dict(ckpt["optim_state"])
         start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt.get("val_loss", float("inf"))
         for _ in range(ckpt["epoch"]):
             scheduler.step()
-        print(f"  Resumed at epoch {ckpt['epoch']}  (val_loss: {best_val_loss:.4f})")
+
+        # IMPORTANT: read the TRUE best val_loss from _best.pth, not from
+        # the resumed _latest.pth checkpoint — otherwise "best" tracking
+        # incorrectly resets to the latest epoch's loss on every resume,
+        # which can let a worse checkpoint overwrite a genuinely better one.
+        best_ckpt_path = Path(args.resume).parent / f"{args.run_name}_best.pth"
+        if best_ckpt_path.exists():
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_val_loss = best_ckpt.get("val_loss", float("inf"))
+        else:
+            best_val_loss = ckpt.get("val_loss", float("inf"))
+
+        print(f"  Resumed at epoch {ckpt['epoch']}  (latest val_loss: {ckpt.get('val_loss', float('nan')):.4f})")
+        print(f"  True best val_loss so far: {best_val_loss:.4f}")
         print(f"  Continuing from epoch {start_epoch}\n")
 
     # ── Logging & Checkpointing ───────────────────────────────────────────
