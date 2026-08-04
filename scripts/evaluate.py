@@ -360,10 +360,23 @@ def compute_detection_metrics(model, loader, device, config, output_dir):
                 if cls in metrics_summary['mean_dist_aps']:
                     per_class[cls] = round(metrics_summary['mean_dist_aps'][cls], 4)
 
+        # Also capture per-class translation/scale/orientation/velocity/attr errors
+        per_class_errors = {}
+        if 'label_tp_errors' in metrics_summary:
+            for cls in CLASS_NAMES:
+                if cls in metrics_summary['label_tp_errors']:
+                    per_class_errors[cls] = {
+                        k: round(v, 4) for k, v in metrics_summary['label_tp_errors'][cls].items()
+                    }
+
         return {
             'mAP': round(metrics_summary['mean_ap'], 4),
             'NDS': round(metrics_summary['nd_score'], 4),
             'per_class_AP': per_class,
+            'per_class_errors': per_class_errors,
+            'mATE': round(metrics_summary.get('tp_errors', {}).get('trans_err', 0), 4),
+            'mASE': round(metrics_summary.get('tp_errors', {}).get('scale_err', 0), 4),
+            'mAOE': round(metrics_summary.get('tp_errors', {}).get('orient_err', 0), 4),
         }
 
     except Exception as e:
