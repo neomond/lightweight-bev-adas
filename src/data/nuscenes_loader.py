@@ -48,7 +48,7 @@ class NuScenesDataset(Dataset):
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
         self.samples = self._get_samples(split)
         print(f"Loaded {len(self.samples)} samples ({split} split)")
-    
+
     def _get_samples(self, split):
         from nuscenes.utils.splits import create_splits_scenes
 
@@ -125,16 +125,21 @@ class NuScenesDataset(Dataset):
         pc = LidarPointCloud.from_file(
             os.path.join(self.dataroot, lidar_data["filename"])
         )
-        points = pc.points.T.astype(np.float32)  # (N, 4) — ensure float32 before matmul
+        points = pc.points.T.astype(np.float32)
         calib = self.nusc.get(
             "calibrated_sensor", lidar_data["calibrated_sensor_token"]
         )
         rot = Quaternion(calib["rotation"]).rotation_matrix.astype(np.float32)
         trans = np.array(calib["translation"], dtype=np.float32)
+
+        # Guard against corrupted calibration entries...
+        if not (np.isfinite(rot).all() and np.isfinite(trans).all()):
+            print(f"  ⚠️  Corrupted calibration for sample_data {lidar_data['token']} "
+                  f"(non-finite rotation/translation) — using identity transform")
+            rot = np.eye(3, dtype=np.float32)
+            trans = np.zeros(3, dtype=np.float32)
+
         # Filter out sensor artifact points BEFORE transforming.
-        # Raw .pcd.bin files contain a small number of points with extreme or
-        # NaN/Inf values that cause float32 overflow in matmul. 200m is safely
-        # beyond the 100m BEV range so no valid points are lost.
         pre_mask = (
             np.isfinite(points[:, :3]).all(axis=1) &
             (np.abs(points[:, 0]) < 200.0) &
