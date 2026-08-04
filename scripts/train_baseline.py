@@ -34,6 +34,7 @@ import sys
 import time
 import yaml
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -51,43 +52,67 @@ from src.utils.device import get_device
 
 # ── Loss Functions ────────────────────────────────────────────────────────────
 
+# class FocalLoss(nn.Module):
+#     """Focal loss for dense object detection heatmaps.
+
+#     Focal loss down-weights easy negatives so the model focuses on
+#     hard examples and rare foreground cells. Standard in CenterPoint-style
+#     3D detectors (Zhou et al., 2019).
+
+#     L_focal = -α(1-p)^γ * log(p)  for positives
+#             = -(1-α) * p^γ * log(1-p)  for negatives
+#     """
+
+#     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+#         super().__init__()
+#         self.alpha = alpha
+#         self.gamma = gamma
+
+#     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             pred:   (B, C, H, W)  sigmoid-activated heatmap predictions
+#             target: (B, C, H, W)  binary ground-truth heatmaps in [0,1]
+#         Returns:
+#             Scalar loss
+#         """
+#         pred = pred.clamp(1e-6, 1 - 1e-6)
+
+#         pos_mask = target.eq(1).float()
+#         neg_mask = target.lt(1).float()
+
+#         pos_loss = -self.alpha * (1 - pred).pow(self.gamma) * torch.log(pred) * pos_mask
+#         neg_loss = -(1 - self.alpha) * pred.pow(self.gamma) * torch.log(1 - pred) * neg_mask
+
+#         n_pos = pos_mask.sum().clamp(min=1)
+#         loss = (pos_loss + neg_loss).sum() / n_pos
+#         return loss
+
 class FocalLoss(nn.Module):
-    """Focal loss for dense object detection heatmaps.
+    class_weights: Optional[torch.Tensor]
 
-    Focal loss down-weights easy negatives so the model focuses on
-    hard examples and rare foreground cells. Standard in CenterPoint-style
-    3D detectors (Zhou et al., 2019).
-
-    L_focal = -α(1-p)^γ * log(p)  for positives
-            = -(1-α) * p^γ * log(1-p)  for negatives
-    """
-
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, class_weights: Optional[torch.Tensor] = None):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.register_buffer("class_weights", class_weights, persistent=False)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            pred:   (B, C, H, W)  sigmoid-activated heatmap predictions
-            target: (B, C, H, W)  binary ground-truth heatmaps in [0,1]
-        Returns:
-            Scalar loss
-        """
         pred = pred.clamp(1e-6, 1 - 1e-6)
-
         pos_mask = target.eq(1).float()
         neg_mask = target.lt(1).float()
 
         pos_loss = -self.alpha * (1 - pred).pow(self.gamma) * torch.log(pred) * pos_mask
         neg_loss = -(1 - self.alpha) * pred.pow(self.gamma) * torch.log(1 - pred) * neg_mask
+        per_cell_loss = pos_loss + neg_loss
+
+        if self.class_weights is not None:
+            w = self.class_weights.view(1, -1, 1, 1).to(per_cell_loss.device)
+            per_cell_loss = per_cell_loss * w
 
         n_pos = pos_mask.sum().clamp(min=1)
-        loss = (pos_loss + neg_loss).sum() / n_pos
-        return loss
-
-
+        return per_cell_loss.sum() / n_pos
+    
 def build_heatmap_targets(
     annotations: list,
     num_classes: int,
@@ -377,6 +402,8 @@ def main():
     parser.add_argument("--run-name", default="baseline", help="Name for logs/checkpoints")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--use-class-weights", action="store_true",
+                        help="Apply per-class weights to FocalLoss (from checkpoints/class_weights.pt)")
     args = parser.parse_args()
     set_seed(args.seed)
     
@@ -456,9 +483,16 @@ def main():
         ).item())
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0)
+    class_weights = None
+    if args.use_class_weights:
+        weights_path = Path("checkpoints/class_weights.pt")
+        if weights_path.exists():
+            class_weights = torch.load(weights_path).to(device)
+            print(f"Using class weights: {class_weights.tolist()}")
+        else:
+            print("WARNING: --use-class-weights set but checkpoints/class_weights.pt not found!")
+    focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0, class_weights=class_weights)
 
-    # ── Resume ────────────────────────────────────────────────────────────
     # ── Resume ────────────────────────────────────────────────────────────
     start_epoch = 1
     best_val_loss = float("inf")
