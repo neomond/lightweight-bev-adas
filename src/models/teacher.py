@@ -19,9 +19,8 @@ for knowledge distillation. It has two modes:
     The teacher is ALWAYS frozen — no gradients, no weight updates.
 
 BEVFusion output shapes (MIT version, nuScenes):
-    fused_bev:  (B, 256, 128, 128)  — fused camera+LiDAR BEV features
-    heatmap:    (B, 10,  128, 128)  — class probability heatmaps
-    regression: (B, 8,   128, 128)  — box regression (x,y,z,w,l,h,sin,cos)
+    fused_bev:  (B, 256, 180, 180)  — fused camera+LiDAR BEV features
+    heatmap:    (B, 10,  180, 180)  — class probability heatmaps
 
 Note on resolution mismatch:
     BEVFusion outputs at 128×128; our student outputs at 50×50.
@@ -62,8 +61,8 @@ class TeacherBEVFusion(nn.Module):
     """
 
     # BEVFusion MIT output resolution on nuScenes
-    TEACHER_BEV_H = 128
-    TEACHER_BEV_W = 128
+    TEACHER_BEV_H = 180 # confirmed via real forward pass; was 128 (guess) before real weights available
+    TEACHER_BEV_W = 180
     TEACHER_BEV_C = 256
     NUM_CLASSES    = 10
     REG_DIMS       = 8
@@ -117,9 +116,9 @@ class TeacherBEVFusion(nn.Module):
             self.TEACHER_BEV_H, self.TEACHER_BEV_W,
             device=device,
         )
-        fused_bev  = self.mock_bev(seed)                    # (B, 256, 128, 128)
-        heatmap    = self.mock_heatmap(fused_bev)           # (B, 10,  128, 128)
-        regression = self.mock_regression(fused_bev)        # (B, 8,   128, 128)
+        fused_bev  = self.mock_bev(seed)                    
+        heatmap    = self.mock_heatmap(fused_bev)           
+        regression = self.mock_regression(fused_bev)        
 
         return {
             "fused_bev":  fused_bev,
@@ -335,11 +334,9 @@ class TeacherBEVFusion(nn.Module):
             x = self.bevfusion.decoder["neck"](x)
 
             pred_dicts = self.bevfusion.heads["object"](x, inputs["metas"])
-            print("DEBUG pred_dicts type:", type(pred_dicts))
-            print("DEBUG pred_dicts[0] type:", type(pred_dicts[0]))
-            if isinstance(pred_dicts[0], list):
-                print("DEBUG pred_dicts[0][0] type:", type(pred_dicts[0][0]))
-                print("DEBUG pred_dicts[0][0] keys:", list(pred_dicts[0][0].keys()))
+            # pred_dicts structure: tuple(list(dict)) — outer tuple/list come
+            # from mmdet3d's multi_apply(), inner dict from TransFusionHead's
+            # forward_single(). Confirmed via debug run on RunPod, 2026-08-09.
 
             pred_dict = pred_dicts[0][0]  # unwrap one extra list level from multi_apply
 
@@ -403,13 +400,13 @@ if __name__ == "__main__":
     dummy_images = torch.randn(B, 6, 3, 384, 640)
     outputs = teacher(camera_images=dummy_images)
 
-    print(f"fused_bev:  {outputs['fused_bev'].shape}   (expected: [{B}, 256, 128, 128])")
-    print(f"heatmap:    {outputs['heatmap'].shape}    (expected: [{B}, 10, 128, 128])")
-    print(f"regression: {outputs['regression'].shape}  (expected: [{B}, 8, 128, 128])")
+    print(f"fused_bev:  {outputs['fused_bev'].shape}   (expected: [{B}, 256, {teacher.TEACHER_BEV_H}, {teacher.TEACHER_BEV_W}])")
+    print(f"heatmap:    {outputs['heatmap'].shape}    (expected: [{B}, 10, {teacher.TEACHER_BEV_H}, {teacher.TEACHER_BEV_W}])")
+    print(f"regression: {outputs['regression'].shape}  (expected: [{B}, 8, {teacher.TEACHER_BEV_H}, {teacher.TEACHER_BEV_W}])")
 
-    assert outputs["fused_bev"].shape  == (B, 256, 128, 128)
-    assert outputs["heatmap"].shape    == (B, 10,  128, 128)
-    assert outputs["regression"].shape == (B, 8,   128, 128)
+    assert outputs["fused_bev"].shape  == (B, 256, teacher.TEACHER_BEV_H, teacher.TEACHER_BEV_W)
+    assert outputs["heatmap"].shape    == (B, 10,  teacher.TEACHER_BEV_H, teacher.TEACHER_BEV_W)
+    assert outputs["regression"].shape == (B, 8,   teacher.TEACHER_BEV_H, teacher.TEACHER_BEV_W)
     print("✅ Output shape checks passed")
 
     assert not outputs["fused_bev"].requires_grad
