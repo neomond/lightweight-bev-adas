@@ -79,7 +79,7 @@ class CachedTeacherDataset(Dataset):
         "regression": (8,   128, 128),
     }
 
-    def __init__(self, base_dataset: NuScenesDataset, cache_dir: str):
+    def __init__(self, base_dataset: NuScenesDataset, cache_dir):
         self.base    = base_dataset
         self.cache   = Path(cache_dir)
         self._warned = set()   # track missing tokens to avoid spam
@@ -135,6 +135,7 @@ def train_one_epoch_kd(
     config,
     global_step,
     use_mock_teacher: bool = False,
+    use_real_teacher: bool = False,
 ):
     model.train()
     x_range = tuple(config["data"]["x_range"])
@@ -162,12 +163,27 @@ def train_one_epoch_kd(
         fused_bev   = student_out["fused_bev"]                  # (B,256,50,50)
 
         # ── Teacher outputs ───────────────────────────────────────────────
-        if use_mock_teacher and teacher is not None:
-            # Mock teacher: run live (development mode)
-            teacher_out = teacher(camera_images=camera_images)
+        # ── Teacher outputs ───────────────────────────────────────────────
+        if teacher is not None and (use_mock_teacher or use_real_teacher):
+            if use_real_teacher:
+                lidar_calibration = batch["lidar_calibration"]
+                lidar_points_5ch  = batch["lidar_points_5ch"]
+                teacher_out = teacher(
+                    camera_images=camera_images,
+                    lidar_points=lidar_points,
+                    calibration=calibration,
+                    lidar_calibration=lidar_calibration,
+                    lidar_points_5ch=lidar_points_5ch,
+                )
+            else:
+                # Mock teacher: run live (development mode)
+                teacher_out = teacher(camera_images=camera_images)
+
             t_fused = teacher_out["fused_bev"].to(device)
             t_hm    = teacher_out["heatmap"].to(device)
-            t_reg   = teacher_out["regression"].to(device)
+            t_reg   = teacher_out["regression"]  # may be None for real teacher
+            if t_reg is not None:
+                t_reg = t_reg.to(device)
         else:
             # Cached teacher: load from batch dict
             t_fused = batch["teacher_fused_bev"].to(device)
@@ -236,7 +252,7 @@ def train_one_epoch_kd(
 
 @torch.no_grad()
 def validate_kd(model, loader, focal_loss_fn, kd_loss_fn, device, config,
-                use_mock_teacher=False, teacher=None):
+                use_mock_teacher=False, use_real_teacher=False, teacher=None):
     model.eval()
     x_range = tuple(config["data"]["x_range"])
     y_range = tuple(config["data"]["y_range"])
@@ -255,12 +271,29 @@ def validate_kd(model, loader, focal_loss_fn, kd_loss_fn, device, config,
         pred_reg  = student_out["detections"]["regression"]
         fused_bev = student_out["fused_bev"]
 
-        if use_mock_teacher and teacher is not None:
-            teacher_out = teacher(camera_images=camera_images)
+        # ── Teacher outputs ───────────────────────────────────────────────
+        if teacher is not None and (use_mock_teacher or use_real_teacher):
+            if use_real_teacher:
+                lidar_calibration = batch["lidar_calibration"]
+                lidar_points_5ch  = batch["lidar_points_5ch"]
+                teacher_out = teacher(
+                    camera_images=camera_images,
+                    lidar_points=lidar_points,
+                    calibration=calibration,
+                    lidar_calibration=lidar_calibration,
+                    lidar_points_5ch=lidar_points_5ch,
+                )
+            else:
+                # Mock teacher: run live (development mode)
+                teacher_out = teacher(camera_images=camera_images)
+
             t_fused = teacher_out["fused_bev"].to(device)
             t_hm    = teacher_out["heatmap"].to(device)
-            t_reg   = teacher_out["regression"].to(device)
+            t_reg   = teacher_out["regression"]  # may be None for real teacher
+            if t_reg is not None:
+                t_reg = t_reg.to(device)
         else:
+            # Cached teacher: load from batch dict
             t_fused = batch["teacher_fused_bev"].to(device)
             t_hm    = batch["teacher_heatmap"].to(device)
             t_reg   = batch["teacher_regression"].to(device)
@@ -291,6 +324,10 @@ def main():
     parser.add_argument("--cache-dir",    default="data/teacher_cache")
     parser.add_argument("--mock-teacher", action="store_true",
                         help="Use live mock teacher instead of cache (development)")
+    parser.add_argument("--real-teacher", action="store_true",
+                        help="Use live real BEVFusion teacher (RunPod only, requires mmdet3d)")
+    parser.add_argument("--bevfusion-checkpoint", default="/workspace/bevfusion/pretrained/bevfusion-det.pth",
+                        help="Path to BEVFusion checkpoint (only used with --real-teacher)")
     parser.add_argument("--resume",       default=None,
                         help="Resume from checkpoint path")
     args = parser.parse_args()
@@ -318,7 +355,15 @@ def main():
     print(f"  Epochs:  {epochs}  |  Batch: {batch_size}  |  LR: {lr}")
     print(f"  α={dist_cfg.get('alpha',1.0)}  β={dist_cfg.get('beta',0.5)}  "
           f"T={dist_cfg.get('temperature',4.0)}")
-    print(f"  Teacher: {'mock (live)' if args.mock_teacher else f'cache ({args.cache_dir})'}")
+    
+    if args.mock_teacher:
+        teacher_desc = "mock (live)"
+    elif args.real_teacher:
+        teacher_desc = f"real BEVFusion (live, {args.bevfusion_checkpoint})"
+    else:
+        teacher_desc = f"cache ({args.cache_dir})"
+        
+    print(f"  Teacher: {teacher_desc}")
     print(f"{'='*60}\n")
 
     # ── Datasets ──────────────────────────────────────────────────────────
@@ -335,8 +380,9 @@ def main():
         y_range=tuple(data_cfg["x_range"]),
     )
 
-    if args.mock_teacher:
-        # Use base datasets + live mock teacher
+    if args.mock_teacher or args.real_teacher:
+        # Both mock and real-live modes need calibration/lidar_calibration/
+        # lidar_points_5ch from the base collate_fn — no cached teacher outputs needed.
         train_dataset = train_base
         val_dataset   = val_base
         _collate      = collate_fn
@@ -364,6 +410,16 @@ def main():
     if args.mock_teacher:
         teacher = TeacherBEVFusion(mock=True).to(device)
         teacher.eval()
+    elif args.real_teacher:
+        teacher = TeacherBEVFusion(
+            mock=False,
+            checkpoint=args.bevfusion_checkpoint,
+            device=device,
+        ).to(device)
+        teacher.eval()
+        if teacher.mock:
+            print("⚠️  WARNING: --real-teacher was requested but loading failed; "
+                  "silently fell back to mock mode. Check the error above.")
 
     params = model.count_parameters()
     print("Student Parameters:")
@@ -424,12 +480,13 @@ def main():
         avgs, global_step = train_one_epoch_kd(
             model, train_loader, teacher, optimizer, scheduler,
             focal_loss_fn, kd_loss_fn, device, epoch, writer,
-            config, global_step, args.mock_teacher,
+            config, global_step, args.mock_teacher, args.real_teacher,
         )
 
         val_loss = validate_kd(
             model, val_loader, focal_loss_fn, kd_loss_fn, device, config,
-            use_mock_teacher=args.mock_teacher, teacher=teacher,
+            use_mock_teacher=args.mock_teacher, use_real_teacher=args.real_teacher,
+            teacher=teacher,
         )
 
         history.append({"epoch": epoch, **avgs, "val_loss": val_loss})
