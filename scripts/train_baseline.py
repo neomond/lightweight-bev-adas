@@ -475,7 +475,7 @@ def main():
         # applied to train_baseline.py earlier.
         best_ckpt_path = Path(args.resume).parent / f"{args.run_name}_best.pth"
         if best_ckpt_path.exists():
-            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu")
             best_val = best_ckpt.get("val_loss", float("inf"))
         else:
             best_val = ckpt.get("val_loss", float("inf"))
