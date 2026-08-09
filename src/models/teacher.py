@@ -335,9 +335,15 @@ class TeacherBEVFusion(nn.Module):
             x = self.bevfusion.decoder["neck"](x)
 
             pred_dicts = self.bevfusion.heads["object"](x, inputs["metas"])
-            pred_dict = pred_dicts[0]
+            print("DEBUG pred_dicts type:", type(pred_dicts))
+            print("DEBUG pred_dicts[0] type:", type(pred_dicts[0]))
+            if isinstance(pred_dicts[0], list):
+                print("DEBUG pred_dicts[0][0] type:", type(pred_dicts[0][0]))
+                print("DEBUG pred_dicts[0][0] keys:", list(pred_dicts[0][0].keys()))
 
-            dense_heatmap = pred_dict["dense_heatmap"]
+            pred_dict = pred_dicts[0][0]  # unwrap one extra list level from multi_apply
+
+            dense_heatmap = pred_dict["dense_heatmap"]        # (B, num_classes, H, W), pre-sigmoid
             heatmap = torch.sigmoid(dense_heatmap)
 
             return {
