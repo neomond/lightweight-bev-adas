@@ -168,6 +168,14 @@ class TeacherBEVFusion(nn.Module):
             cfg = Config(recursive_eval(configs), filename=cfg_path)
 
             self.bevfusion = build_model(cfg.model)
+             # This checkpoint's dtransform (Conv2d(1, 8, 1)) was trained with
+            # only scalar depth, but add_depth_features defaults to True in
+            # this codebase version, which would build a 6-channel depth
+            # tensor that dtransform can't accept — a genuine inconsistency
+            # in the base repo, unrelated to our input format. Force it off
+            # to match the checkpoint's actual trained architecture.
+            self.bevfusion.encoders["camera"]["vtransform"].add_depth_features = False
+            
             load_checkpoint(self.bevfusion, self.checkpoint, map_location="cpu")
             self.bevfusion.eval()
             print(f"✅ BEVFusion teacher loaded from {self.checkpoint}")
