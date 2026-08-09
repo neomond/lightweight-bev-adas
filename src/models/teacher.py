@@ -286,6 +286,18 @@ class TeacherBEVFusion(nn.Module):
                 camera_images, lidar_points, calibration, lidar_calibration
             )
 
+            # BEVFusion's voxelizer expects a LIST of per-sample point clouds
+            # WITHOUT our loader's zero-padding (used only to make tensors
+            # batchable for our own PointPillars encoder) — padding rows
+            # would corrupt voxelization into a malformed sparse tensor.
+            points_list = []
+            for b in range(inputs["points"].shape[0]):
+                pts = inputs["points"][b]
+                valid_mask = ~((pts[:, 0] == 0) & (pts[:, 1] == 0) &
+                                (pts[:, 2] == 0) & (pts[:, 3] == 0))
+                points_list.append(pts[valid_mask])
+            inputs["points"] = points_list
+
             features = []
             # Match forward_single's eval-mode iteration order (reversed keys)
             for sensor in list(self.bevfusion.encoders.keys())[::-1]:
