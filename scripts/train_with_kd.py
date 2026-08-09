@@ -38,6 +38,19 @@ import time
 import yaml
 from pathlib import Path
 
+# Workaround for a setuptools/distutils compatibility bug affecting
+# torch.utils.tensorboard's import on some environments (e.g. RunPod's
+# Python 3.8 venv). See: torch/utils/tensorboard/__init__.py accesses
+# distutils.version.LooseVersion as an attribute chain that can fail to
+# resolve even when the underlying module imports fine directly.
+# Guarded with try/except since distutils was removed in Python 3.12+.
+try:
+    import distutils  # type: ignore[import]
+    from distutils.version import LooseVersion  # type: ignore[import]
+    distutils.version.LooseVersion = LooseVersion  # type: ignore[attr-defined]
+except ImportError:
+    pass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -362,7 +375,7 @@ def main():
         teacher_desc = f"real BEVFusion (live, {args.bevfusion_checkpoint})"
     else:
         teacher_desc = f"cache ({args.cache_dir})"
-        
+
     print(f"  Teacher: {teacher_desc}")
     print(f"{'='*60}\n")
 
