@@ -175,7 +175,7 @@ class TeacherBEVFusion(nn.Module):
             # in the base repo, unrelated to our input format. Force it off
             # to match the checkpoint's actual trained architecture.
             self.bevfusion.encoders["camera"]["vtransform"].add_depth_features = False
-            
+
             load_checkpoint(self.bevfusion, self.checkpoint, map_location="cpu")
             self.bevfusion.eval()
             print(f"✅ BEVFusion teacher loaded from {self.checkpoint}")
@@ -206,6 +206,19 @@ class TeacherBEVFusion(nn.Module):
         """
         B, N_cams = camera_images.shape[:2]
         device = camera_images.device
+
+        # BEVFusion's checkpoint expects images at (256, 704) — resize from
+        # our student's (384, 640) resolution. Reshape to merge batch+camera
+        # dims for F.interpolate, then restore original shape.
+        BEVFUSION_IMG_H, BEVFUSION_IMG_W = 256, 704
+        _, _, C, H, W = camera_images.shape
+        if (H, W) != (BEVFUSION_IMG_H, BEVFUSION_IMG_W):
+            flat_images = camera_images.reshape(B * N_cams, C, H, W)
+            flat_images = F.interpolate(
+                flat_images, size=(BEVFUSION_IMG_H, BEVFUSION_IMG_W),
+                mode="bilinear", align_corners=False,
+            )
+            camera_images = flat_images.reshape(B, N_cams, C, BEVFUSION_IMG_H, BEVFUSION_IMG_W)
 
         camera2ego_list, lidar2ego_list = [], []
         lidar2camera_list, lidar2image_list = [], []
