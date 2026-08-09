@@ -259,47 +259,32 @@ class TeacherBEVFusion(nn.Module):
         lidar_points:  Optional[torch.Tensor],
         calibration:   Optional[list],
         lidar_calibration: Optional[list],
+        lidar_points_5ch: Optional[list],
     ) -> dict:
         """Run actual BEVFusion forward pass, extracting:
             - fused_bev:  the fuser's output, pre-decoder (dense, 256ch)
-            - heatmap:    TransFusionHead's dense classification heatmap,
-                          used internally to propose query centers before
-                          the sparse transformer-decoder refinement stage
+            - heatmap:    TransFusionHead's dense classification heatmap
             - regression: NOT dense in TransFusion's architecture — box
-                          regression only exists per-query (sparse, at the
-                          top-K heatmap peaks), not as a dense (8,H,W) grid.
-                          Returned as None; CombinedKDLoss/train_with_kd.py
-                          must handle this by skipping regression-KD when
-                          teacher_regression is None (see TODO below).
-
-        Manually replicates the encoder -> fuser -> decoder -> head.forward()
-        steps from BEVFusion's forward_single(), stopping BEFORE get_bboxes()
-        so we keep the raw dense_heatmap instead of final decoded boxes.
+                          regression only exists per-query (sparse). Returned
+                          as None.
         """
         assert camera_images is not None, "camera_images required for real BEVFusion forward"
         assert lidar_points is not None, "lidar_points required for real BEVFusion forward"
         assert calibration is not None, "calibration required for real BEVFusion forward"
         assert lidar_calibration is not None, "lidar_calibration required for real BEVFusion forward"
+        assert lidar_points_5ch is not None, "lidar_points_5ch required for real BEVFusion forward"
 
         with torch.no_grad():
             inputs = self._build_bevfusion_inputs(
                 camera_images, lidar_points, calibration, lidar_calibration
             )
 
-            # BEVFusion's voxelizer expects a LIST of per-sample point clouds
-            # WITHOUT our loader's zero-padding (used only to make tensors
-            # batchable for our own PointPillars encoder) — padding rows
-            # would corrupt voxelization into a malformed sparse tensor.
-            points_list = []
-            for b in range(inputs["points"].shape[0]):
-                pts = inputs["points"][b]
-                valid_mask = ~((pts[:, 0] == 0) & (pts[:, 1] == 0) &
-                                (pts[:, 2] == 0) & (pts[:, 3] == 0))
-                points_list.append(pts[valid_mask])
-            inputs["points"] = points_list
+            # BEVFusion's voxelizer expects raw 5-channel points
+            # (x, y, z, intensity, ring_index) as a list of per-sample
+            # tensors — NOT our student's 4-channel padded format.
+            inputs["points"] = [p.to(camera_images.device) for p in lidar_points_5ch]
 
             features = []
-            # Match forward_single's eval-mode iteration order (reversed keys)
             for sensor in list(self.bevfusion.encoders.keys())[::-1]:
                 if sensor == "camera":
                     feature = self.bevfusion.extract_camera_features(
@@ -318,7 +303,7 @@ class TeacherBEVFusion(nn.Module):
                     raise ValueError(f"Unsupported sensor in checkpoint: {sensor}")
                 features.append(feature)
 
-            features = features[::-1]  # restore original order, per forward_single
+            features = features[::-1]
 
             if self.bevfusion.fuser is not None:
                 fused_bev = self.bevfusion.fuser(features)
@@ -328,21 +313,17 @@ class TeacherBEVFusion(nn.Module):
             x = self.bevfusion.decoder["backbone"](fused_bev)
             x = self.bevfusion.decoder["neck"](x)
 
-            # Call the object head's forward() directly (NOT get_bboxes) so we
-            # keep the raw dense_heatmap instead of final decoded 3D boxes.
             pred_dicts = self.bevfusion.heads["object"](x, inputs["metas"])
             pred_dict = pred_dicts[0]
 
-            dense_heatmap = pred_dict["dense_heatmap"]        # (B, num_classes, H, W), pre-sigmoid
+            dense_heatmap = pred_dict["dense_heatmap"]
             heatmap = torch.sigmoid(dense_heatmap)
 
             return {
                 "fused_bev":  fused_bev,
                 "heatmap":    heatmap,
-                "regression": None,  # sparse-only in TransFusion; see docstring
+                "regression": None,
             }
-        
-    # ── Public interface ──────────────────────────────────────────────────────
 
     @torch.no_grad()
     def forward(
@@ -351,18 +332,8 @@ class TeacherBEVFusion(nn.Module):
         lidar_points:  Optional[torch.Tensor] = None,
         calibration:   Optional[list] = None,
         lidar_calibration: Optional[list] = None,
+        lidar_points_5ch: Optional[list] = None,
     ) -> dict:
-        """Run teacher forward pass. Always no_grad().
-
-        In mock mode, camera_images/lidar_points are only used to infer
-        batch size and device — their contents are ignored.
-
-        Returns:
-            dict with keys:
-                fused_bev:  (B, 256, 128, 128)  teacher fused BEV features
-                heatmap:    (B, 10,  128, 128)  teacher class heatmaps
-                regression: (B, 8,   128, 128)  teacher box predictions
-        """
         if camera_images is not None:
             B      = camera_images.shape[0]
             device = camera_images.device
@@ -375,7 +346,10 @@ class TeacherBEVFusion(nn.Module):
         if self.mock:
             return self._forward_mock(B, device)
         else:
-            return self._forward_real(camera_images, lidar_points, calibration, lidar_calibration)
+            return self._forward_real(
+                camera_images, lidar_points, calibration,
+                lidar_calibration, lidar_points_5ch,
+            )  
 
     def get_output_shapes(self) -> dict:
         """Return teacher output shapes for documentation / distillation setup."""

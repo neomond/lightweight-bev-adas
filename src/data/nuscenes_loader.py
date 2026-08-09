@@ -79,6 +79,7 @@ class NuScenesDataset(Dataset):
         camera_images, calibration = self._load_cameras(sample)
         lidar_points = self._load_lidar(sample)
         lidar_calibration = self._load_lidar_calib(sample)
+        lidar_points_5ch = self._load_lidar_raw_5ch(sample)
         annotations = self._load_annotations(sample)
         return {
             "camera_images": camera_images,
@@ -86,6 +87,7 @@ class NuScenesDataset(Dataset):
             "annotations": annotations,
             "calibration": calibration,
             "lidar_calibration": lidar_calibration,
+            "lidar_points_5ch": lidar_points_5ch,
             "sample_token": self.samples[idx],
         }
 
@@ -182,6 +184,43 @@ class NuScenesDataset(Dataset):
             ),
             "translation": torch.tensor(calib["translation"], dtype=torch.float32),
         }
+    
+    def _load_lidar_raw_5ch(self, sample):
+        """Load raw 5-channel LiDAR points (x, y, z, intensity, ring_index)
+        directly from the .pcd.bin file, matching BEVFusion's expected
+        load_dim=5 format. Used only for the real BEVFusion teacher —
+        our own student's PointPillars encoder uses the 4-channel version
+        from _load_lidar() instead.
+
+        Points are transformed to ego-frame (same rot/trans as _load_lidar)
+        but WITHOUT max_lidar_points padding/truncation — BEVFusion's own
+        voxelizer handles variable-length point clouds natively.
+        """
+        lidar_data = self.nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+        path = os.path.join(self.dataroot, lidar_data["filename"])
+        points = np.fromfile(path, dtype=np.float32).reshape(-1, 5).astype(np.float32)
+
+        calib = self.nusc.get("calibrated_sensor", lidar_data["calibrated_sensor_token"])
+        rot = Quaternion(calib["rotation"]).rotation_matrix.astype(np.float32)
+        trans = np.array(calib["translation"], dtype=np.float32)
+
+        if not (np.isfinite(rot).all() and np.isfinite(trans).all()):
+            rot = np.eye(3, dtype=np.float32)
+            trans = np.zeros(3, dtype=np.float32)
+
+        pre_mask = (
+            np.isfinite(points[:, :3]).all(axis=1) &
+            (np.abs(points[:, 0]) < 200.0) &
+            (np.abs(points[:, 1]) < 200.0) &
+            (np.abs(points[:, 2]) < 200.0)
+        )
+        points = points[pre_mask]
+
+        # Transform xyz to ego-frame; ring index (col 4) is sensor-intrinsic,
+        # unaffected by the rotation/translation
+        points[:, :3] = points[:, :3] @ rot.T + trans
+
+        return torch.from_numpy(points.astype(np.float32))
 
 
     def _load_annotations(self, sample):
@@ -253,5 +292,6 @@ def collate_fn(batch):
         "annotations": [b["annotations"] for b in batch],
         "calibration": [b["calibration"] for b in batch],
         "lidar_calibration": [b["lidar_calibration"] for b in batch],
+        "lidar_points_5ch": [b["lidar_points_5ch"] for b in batch],
         "sample_tokens": [b["sample_token"] for b in batch],
     }
