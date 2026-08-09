@@ -78,12 +78,14 @@ class NuScenesDataset(Dataset):
         sample = self.nusc.get("sample", self.samples[idx])
         camera_images, calibration = self._load_cameras(sample)
         lidar_points = self._load_lidar(sample)
+        lidar_calibration = self._load_lidar_calib(sample)
         annotations = self._load_annotations(sample)
         return {
             "camera_images": camera_images,
             "lidar_points": lidar_points,
             "annotations": annotations,
             "calibration": calibration,
+            "lidar_calibration": lidar_calibration,
             "sample_token": self.samples[idx],
         }
 
@@ -165,6 +167,22 @@ class NuScenesDataset(Dataset):
                 [points, np.zeros((self.max_lidar_points - n, 4), dtype=np.float32)]
             )
         return torch.from_numpy(points.astype(np.float32))
+    
+
+    def _load_lidar_calib(self, sample):
+        """Get LiDAR's own sensor->ego calibration (separate from point loading,
+        needed for BEVFusion teacher's lidar2ego transform)."""
+        lidar_data = self.nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+        calib = self.nusc.get(
+            "calibrated_sensor", lidar_data["calibrated_sensor_token"]
+        )
+        return {
+            "rotation": torch.tensor(
+                Quaternion(calib["rotation"]).rotation_matrix, dtype=torch.float32
+            ),
+            "translation": torch.tensor(calib["translation"], dtype=torch.float32),
+        }
+
 
     def _load_annotations(self, sample):
         boxes, classes, names = [], [], []
@@ -234,5 +252,6 @@ def collate_fn(batch):
         "lidar_points": torch.stack([b["lidar_points"] for b in batch]),
         "annotations": [b["annotations"] for b in batch],
         "calibration": [b["calibration"] for b in batch],
+        "lidar_calibration": [b["lidar_calibration"] for b in batch],
         "sample_tokens": [b["sample_token"] for b in batch],
     }

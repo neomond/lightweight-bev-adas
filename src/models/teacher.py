@@ -10,9 +10,12 @@ for knowledge distillation. It has two modes:
     KD training loop without needing the actual weights or mmdet3d installed.
     Switch to real mode by setting mock=False and providing a checkpoint path.
 
-  REAL MODE (for Colab / full training):
+  REAL MODE (for RunPod / full training):
     Loads actual BEVFusion pretrained weights and runs a genuine forward pass.
-    Requires: mmdet3d, mmcv, and BEVFusion repo cloned alongside this project.
+    Requires: mmdet3d, mmcv, torchpack, and the BEVFusion repo built at
+    /workspace/bevfusion (see project setup notes). Only importable in that
+    environment — mmdet3d is NOT installed locally, so real-mode imports are
+    deferred until _build_real()/_forward_real() actually run.
     The teacher is ALWAYS frozen — no gradients, no weight updates.
 
 BEVFusion output shapes (MIT version, nuScenes):
@@ -28,16 +31,28 @@ Note on resolution mismatch:
 Usage:
     # Development (mock)
     teacher = TeacherBEVFusion(mock=True)
-    outputs = teacher(camera_images, lidar_points, calibration)
+    outputs = teacher(camera_images, lidar_points, calibration, lidar_calibration)
 
-    # Full training (real weights)
-    teacher = TeacherBEVFusion(mock=False, checkpoint="checkpoints/bevfusion.pth")
-    outputs = teacher(camera_images, lidar_points, calibration)
+    # Full training (real weights, on RunPod)
+    teacher = TeacherBEVFusion(mock=False, checkpoint="pretrained/bevfusion-det.pth")
+    outputs = teacher(camera_images, lidar_points, calibration, lidar_calibration)
 """
+
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from src.data.nuscenes_loader import CAMERA_CHANNELS
+
+
+def _build_homogeneous(rotation: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+    """Compose a 3x3 rotation + 3-vector translation into a 4x4 homogeneous transform."""
+    T = torch.eye(4, dtype=torch.float32)
+    T[:3, :3] = rotation
+    T[:3, 3] = translation
+    return T
 
 
 class TeacherBEVFusion(nn.Module):
@@ -56,8 +71,8 @@ class TeacherBEVFusion(nn.Module):
     def __init__(
         self,
         mock: bool = True,
-        checkpoint: str = None,
-        device: torch.device = None,
+        checkpoint: Optional[str] = None,
+        device: Optional[torch.device] = None,
     ):
         super().__init__()
         self.mock = mock
@@ -82,9 +97,8 @@ class TeacherBEVFusion(nn.Module):
         The mock uses small learned conv layers so outputs are spatially
         coherent (not pure noise) and gradients flow correctly through the
         distillation losses during development testing. In real training the
-        teacher outputs come from cache files, not this network.
+        teacher outputs come from a genuine BEVFusion forward pass instead.
         """
-        # Mock fused BEV generator: takes a simple noise seed → BEVFusion-shaped output
         self.mock_bev = nn.Sequential(
             nn.Conv2d(1, 64, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -98,7 +112,6 @@ class TeacherBEVFusion(nn.Module):
 
     def _forward_mock(self, batch_size: int, device: torch.device) -> dict:
         """Generate mock teacher outputs of correct shape and reasonable scale."""
-        # Seed: small random noise at teacher BEV resolution
         seed = torch.randn(
             batch_size, 1,
             self.TEACHER_BEV_H, self.TEACHER_BEV_W,
@@ -119,31 +132,41 @@ class TeacherBEVFusion(nn.Module):
     def _build_real(self):
         """Attempt to load actual BEVFusion weights.
 
-        Requires:
-            - BEVFusion repo cloned to ../BEVFusion/ relative to project root
-            - mmdet3d and mmcv installed in the environment
+        Requires (RunPod environment only — see project setup notes):
+            - BEVFusion repo built at /workspace/bevfusion
+            - Python 3.8 venv at /workspace/venv38 with mmdet3d, mmcv-full,
+              torchpack, and their dependencies installed
             - Pretrained checkpoint at self.checkpoint
+              (e.g. /workspace/bevfusion/pretrained/bevfusion-det.pth)
+
+        Config is loaded via torchpack's recursive config system (NOT plain
+        mmcv.Config.fromfile) — BEVFusion's convfuser.yaml is only a fragment;
+        torchpack.utils.config.configs.load(..., recursive=True) walks up the
+        directory tree merging all sibling default.yaml files.
 
         If loading fails (missing deps, wrong path), falls back to mock mode
         with a clear warning so training doesn't crash silently.
         """
         try:
-            import sys
             import os
-            bevfusion_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "BEVFusion"
+
+            # mmdet3d/mmcv/torchpack are only installed in the RunPod venv —
+            # not available locally, so these imports must stay deferred here.
+            from torchpack.utils.config import configs  # type: ignore[import]
+            from mmcv import Config  # type: ignore[import]
+            from mmcv.runner import load_checkpoint  # type: ignore[import]
+            from mmdet3d.utils import recursive_eval  # type: ignore[import]
+            from mmdet3d.models import build_model  # type: ignore[import]
+
+            bevfusion_path = "/workspace/bevfusion"
+            cfg_path = os.path.join(
+                bevfusion_path, "configs", "nuscenes", "det", "transfusion",
+                "secfpn", "camera+lidar", "swint_v0p075", "convfuser.yaml"
             )
-            sys.path.insert(0, bevfusion_path)
 
-            from mmdet3d.models import build_model
-            from mmcv import Config
-            from mmcv.runner import load_checkpoint
+            configs.load(cfg_path, recursive=True)
+            cfg = Config(recursive_eval(configs), filename=cfg_path)
 
-            cfg_path = os.path.join(bevfusion_path, "configs", "nuscenes",
-                                    "det", "transfusion", "secfpn",
-                                    "camera+lidar", "swint_v0.22.4",
-                                    "convfuser.yaml")
-            cfg = Config.fromfile(cfg_path)
             self.bevfusion = build_model(cfg.model)
             load_checkpoint(self.bevfusion, self.checkpoint, map_location="cpu")
             self.bevfusion.eval()
@@ -155,25 +178,124 @@ class TeacherBEVFusion(nn.Module):
             self.mock = True
             self._build_mock()
 
-    def _forward_real(
+    def _build_bevfusion_inputs(
         self,
         camera_images: torch.Tensor,
-        lidar_points:  torch.Tensor,
-        calibration:   list,
+        lidar_points: torch.Tensor,
+        calibration: list,
+        lidar_calibration: list,
+    ) -> dict:
+        """
+        Adapt our (camera_images, lidar_points, calibration, lidar_calibration)
+        into BEVFusion's expected forward() arguments: camera2ego, lidar2ego,
+        lidar2camera, lidar2image, camera_intrinsics, camera2lidar,
+        img_aug_matrix, lidar_aug_matrix, metas.
+
+        NOTE: `metas` currently only carries a placeholder box_type_3d field.
+        This is the least-verified part of the adapter — BEVFusion's internal
+        code may read additional keys we haven't discovered yet. Expect this
+        to need iteration once tested against the real model on RunPod.
+        """
+        B, N_cams = camera_images.shape[:2]
+        device = camera_images.device
+
+        camera2ego_list, lidar2ego_list = [], []
+        lidar2camera_list, lidar2image_list = [], []
+        camera_intrinsics_list, camera2lidar_list = [], []
+
+        for b in range(B):
+            cam2ego_b, cam_intrin_b = [], []
+            lidar2cam_b, lidar2img_b, cam2lidar_b = [], [], []
+
+            lidar2ego_b = _build_homogeneous(
+                lidar_calibration[b]["rotation"], lidar_calibration[b]["translation"]
+            ).to(device)
+
+            for cam_name in CAMERA_CHANNELS:
+                calib = calibration[b][cam_name]
+                cam2ego = _build_homogeneous(calib["rotation"], calib["translation"]).to(device)
+                cam2ego_b.append(cam2ego)
+
+                # lidar -> camera = inverse(camera->ego) @ (lidar->ego)
+                lidar2cam = torch.inverse(cam2ego) @ lidar2ego_b
+                lidar2cam_b.append(lidar2cam)
+                cam2lidar_b.append(torch.inverse(lidar2cam))
+
+                # Intrinsics, padded to 4x4 for lidar2image composition
+                intrinsic_4x4 = torch.eye(4, dtype=torch.float32, device=device)
+                intrinsic_4x4[:3, :3] = calib["intrinsic"].to(device)
+                cam_intrin_b.append(intrinsic_4x4)
+                lidar2img_b.append(intrinsic_4x4 @ lidar2cam)
+
+            camera2ego_list.append(torch.stack(cam2ego_b))
+            lidar2ego_list.append(lidar2ego_b)
+            lidar2camera_list.append(torch.stack(lidar2cam_b))
+            lidar2image_list.append(torch.stack(lidar2img_b))
+            camera_intrinsics_list.append(torch.stack(cam_intrin_b))
+            camera2lidar_list.append(torch.stack(cam2lidar_b))
+
+        img_aug_matrix = torch.eye(4, device=device).unsqueeze(0).unsqueeze(0).repeat(B, N_cams, 1, 1)
+        lidar_aug_matrix = torch.eye(4, device=device).unsqueeze(0).repeat(B, 1, 1)
+        metas = [{"box_type_3d": None} for _ in range(B)]  # placeholder — needs verification on RunPod
+
+        return {
+            "img": camera_images,
+            "points": lidar_points,
+            "camera2ego": torch.stack(camera2ego_list),
+            "lidar2ego": torch.stack(lidar2ego_list),
+            "lidar2camera": torch.stack(lidar2camera_list),
+            "lidar2image": torch.stack(lidar2image_list),
+            "camera_intrinsics": torch.stack(camera_intrinsics_list),
+            "camera2lidar": torch.stack(camera2lidar_list),
+            "img_aug_matrix": img_aug_matrix,
+            "lidar_aug_matrix": lidar_aug_matrix,
+            "metas": metas,
+            "depths": None,
+        }
+
+    def _forward_real(
+        self,
+        camera_images: Optional[torch.Tensor],
+        lidar_points:  Optional[torch.Tensor],
+        calibration:   Optional[list],
+        lidar_calibration: Optional[list],
     ) -> dict:
         """Run actual BEVFusion forward pass.
 
-        This wraps BEVFusion's mmdet3d-style forward into our dict format.
-        The exact call signature depends on the BEVFusion version — adjust
-        if needed when plugging in real weights.
+        Adapts our data format to BEVFusion's forward() signature via
+        _build_bevfusion_inputs(), runs the frozen model, then extracts
+        fused_bev/heatmap/regression in our own dict format.
+
+        NOTE: the exact attribute names for extracting the fused BEV feature
+        map and raw head outputs from BEVFusion's internal forward pass are
+        not yet confirmed — this needs verification against the model's
+        actual forward_single()/extract_feat() implementation on RunPod
+        before this can be trusted. Marked as first thing to check when
+        testing resumes.
         """
+        assert camera_images is not None, "camera_images required for real BEVFusion forward"
+        assert lidar_points is not None, "lidar_points required for real BEVFusion forward"
+        assert calibration is not None, "calibration required for real BEVFusion forward"
+        assert lidar_calibration is not None, "lidar_calibration required for real BEVFusion forward"
+
         with torch.no_grad():
-            # BEVFusion expects mmdet3d-style input dicts
-            # This will need adaptation to BEVFusion's actual API
-            # when real weights are available — placeholder for now
+            inputs = self._build_bevfusion_inputs(
+                camera_images, lidar_points, calibration, lidar_calibration
+            )
+
+            # TODO(verify on RunPod): confirm the correct call — likely
+            # self.bevfusion.forward_single(...) or extract_feat(...) rather
+            # than a generic forward(), depending on how BEVFusion separates
+            # feature extraction from the detection head. Also need to
+            # confirm the returned dict/tuple structure to extract:
+            #   - fused BEV feature map -> our 'fused_bev'
+            #   - raw classification heatmap -> our 'heatmap'
+            #   - raw box regression -> our 'regression'
             raise NotImplementedError(
-                "Real BEVFusion forward pass — implement when weights available. "
-                "See scripts/cache_teacher_outputs.py for the offline caching approach."
+                "_build_bevfusion_inputs() is ready and tested for shape/type "
+                "correctness, but the actual self.bevfusion(**inputs) call and "
+                "output-extraction logic still needs to be written and verified "
+                "against the real model on RunPod. See TODO comments above."
             )
 
     # ── Public interface ──────────────────────────────────────────────────────
@@ -181,9 +303,10 @@ class TeacherBEVFusion(nn.Module):
     @torch.no_grad()
     def forward(
         self,
-        camera_images: torch.Tensor = None,
-        lidar_points:  torch.Tensor = None,
-        calibration:   list = None,
+        camera_images: Optional[torch.Tensor] = None,
+        lidar_points:  Optional[torch.Tensor] = None,
+        calibration:   Optional[list] = None,
+        lidar_calibration: Optional[list] = None,
     ) -> dict:
         """Run teacher forward pass. Always no_grad().
 
@@ -208,7 +331,7 @@ class TeacherBEVFusion(nn.Module):
         if self.mock:
             return self._forward_mock(B, device)
         else:
-            return self._forward_real(camera_images, lidar_points, calibration)
+            return self._forward_real(camera_images, lidar_points, calibration, lidar_calibration)
 
     def get_output_shapes(self) -> dict:
         """Return teacher output shapes for documentation / distillation setup."""
@@ -228,28 +351,22 @@ if __name__ == "__main__":
     teacher = TeacherBEVFusion(mock=True)
     teacher.eval()
 
-    # Verify no gradients on teacher parameters
     for name, param in teacher.named_parameters():
         assert not param.requires_grad, f"Teacher param {name} has grad!"
     print("✅ All teacher parameters frozen")
 
-    # Forward pass
     dummy_images = torch.randn(B, 6, 3, 384, 640)
     outputs = teacher(camera_images=dummy_images)
 
-    print(f"fused_bev:  {outputs['fused_bev'].shape}   "
-          f"(expected: [{B}, 256, 128, 128])")
-    print(f"heatmap:    {outputs['heatmap'].shape}    "
-          f"(expected: [{B}, 10, 128, 128])")
-    print(f"regression: {outputs['regression'].shape}  "
-          f"(expected: [{B}, 8, 128, 128])")
+    print(f"fused_bev:  {outputs['fused_bev'].shape}   (expected: [{B}, 256, 128, 128])")
+    print(f"heatmap:    {outputs['heatmap'].shape}    (expected: [{B}, 10, 128, 128])")
+    print(f"regression: {outputs['regression'].shape}  (expected: [{B}, 8, 128, 128])")
 
     assert outputs["fused_bev"].shape  == (B, 256, 128, 128)
     assert outputs["heatmap"].shape    == (B, 10,  128, 128)
     assert outputs["regression"].shape == (B, 8,   128, 128)
     print("✅ Output shape checks passed")
 
-    # Verify teacher outputs don't carry gradients into student graph
     assert not outputs["fused_bev"].requires_grad
     print("✅ Teacher outputs detached from computation graph")
     print("✅ TeacherBEVFusion ready")
