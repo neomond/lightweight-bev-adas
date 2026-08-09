@@ -70,6 +70,7 @@ from scripts.train_baseline import (
     FocalLoss,
     build_heatmap_targets,
     detection_loss,
+    set_seed,
 )
 
 
@@ -343,7 +344,10 @@ def main():
                         help="Path to BEVFusion checkpoint (only used with --real-teacher)")
     parser.add_argument("--resume",       default=None,
                         help="Resume from checkpoint path")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
     args = parser.parse_args()
+    set_seed(args.seed)
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
