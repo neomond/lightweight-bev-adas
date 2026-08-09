@@ -473,7 +473,7 @@ def main():
     global_step = 0
 
     if args.resume and Path(args.resume).exists():
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optim_state"])
         start_epoch = ckpt["epoch"] + 1
