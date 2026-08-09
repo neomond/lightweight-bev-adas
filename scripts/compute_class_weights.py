@@ -37,12 +37,13 @@ MAX_WEIGHT = 3.0  # cap to avoid instability from near-single-instance classes
 
 
 def compute_class_weights():
-    counts = torch.tensor(
-        [ANNOTATION_COUNTS[c] for c in CLASS_NAMES], dtype=torch.float32
-    )
-    inv_freq = 1.0 / counts
+    counts = torch.tensor([ANNOTATION_COUNTS[c] for c in CLASS_NAMES], dtype=torch.float32)
+    # sqrt-dampened inverse frequency — gentler than raw inverse frequency,
+    # avoids over-suppressing dominant classes (car/pedestrian) to the point
+    # where the model stops learning them entirely
+    inv_freq = 1.0 / torch.sqrt(counts)
     weights = inv_freq * (len(CLASS_NAMES) / inv_freq.sum())  # normalize to mean 1.0
-    weights = weights.clamp(max=MAX_WEIGHT)
+    weights = weights.clamp(min=0.3, max=MAX_WEIGHT)  # floor AND ceiling this time
 
     print("Class weights (annotation-count based, capped at", MAX_WEIGHT, "):")
     for cls, w, c in zip(CLASS_NAMES, weights.tolist(), counts.tolist()):

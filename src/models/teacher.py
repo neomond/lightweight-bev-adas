@@ -260,18 +260,21 @@ class TeacherBEVFusion(nn.Module):
         calibration:   Optional[list],
         lidar_calibration: Optional[list],
     ) -> dict:
-        """Run actual BEVFusion forward pass.
+        """Run actual BEVFusion forward pass, extracting:
+            - fused_bev:  the fuser's output, pre-decoder (dense, 256ch)
+            - heatmap:    TransFusionHead's dense classification heatmap,
+                          used internally to propose query centers before
+                          the sparse transformer-decoder refinement stage
+            - regression: NOT dense in TransFusion's architecture — box
+                          regression only exists per-query (sparse, at the
+                          top-K heatmap peaks), not as a dense (8,H,W) grid.
+                          Returned as None; CombinedKDLoss/train_with_kd.py
+                          must handle this by skipping regression-KD when
+                          teacher_regression is None (see TODO below).
 
-        Adapts our data format to BEVFusion's forward() signature via
-        _build_bevfusion_inputs(), runs the frozen model, then extracts
-        fused_bev/heatmap/regression in our own dict format.
-
-        NOTE: the exact attribute names for extracting the fused BEV feature
-        map and raw head outputs from BEVFusion's internal forward pass are
-        not yet confirmed — this needs verification against the model's
-        actual forward_single()/extract_feat() implementation on RunPod
-        before this can be trusted. Marked as first thing to check when
-        testing resumes.
+        Manually replicates the encoder -> fuser -> decoder -> head.forward()
+        steps from BEVFusion's forward_single(), stopping BEFORE get_bboxes()
+        so we keep the raw dense_heatmap instead of final decoded boxes.
         """
         assert camera_images is not None, "camera_images required for real BEVFusion forward"
         assert lidar_points is not None, "lidar_points required for real BEVFusion forward"
@@ -283,21 +286,50 @@ class TeacherBEVFusion(nn.Module):
                 camera_images, lidar_points, calibration, lidar_calibration
             )
 
-            # TODO(verify on RunPod): confirm the correct call — likely
-            # self.bevfusion.forward_single(...) or extract_feat(...) rather
-            # than a generic forward(), depending on how BEVFusion separates
-            # feature extraction from the detection head. Also need to
-            # confirm the returned dict/tuple structure to extract:
-            #   - fused BEV feature map -> our 'fused_bev'
-            #   - raw classification heatmap -> our 'heatmap'
-            #   - raw box regression -> our 'regression'
-            raise NotImplementedError(
-                "_build_bevfusion_inputs() is ready and tested for shape/type "
-                "correctness, but the actual self.bevfusion(**inputs) call and "
-                "output-extraction logic still needs to be written and verified "
-                "against the real model on RunPod. See TODO comments above."
-            )
+            features = []
+            # Match forward_single's eval-mode iteration order (reversed keys)
+            for sensor in list(self.bevfusion.encoders.keys())[::-1]:
+                if sensor == "camera":
+                    feature = self.bevfusion.extract_camera_features(
+                        inputs["img"], inputs["points"], None,
+                        inputs["camera2ego"], inputs["lidar2ego"],
+                        inputs["lidar2camera"], inputs["lidar2image"],
+                        inputs["camera_intrinsics"], inputs["camera2lidar"],
+                        inputs["img_aug_matrix"], inputs["lidar_aug_matrix"],
+                        inputs["metas"], gt_depths=inputs["depths"],
+                    )
+                    if isinstance(feature, (list, tuple)):
+                        feature = feature[0]
+                elif sensor == "lidar":
+                    feature = self.bevfusion.extract_features(inputs["points"], "lidar")
+                else:
+                    raise ValueError(f"Unsupported sensor in checkpoint: {sensor}")
+                features.append(feature)
 
+            features = features[::-1]  # restore original order, per forward_single
+
+            if self.bevfusion.fuser is not None:
+                fused_bev = self.bevfusion.fuser(features)
+            else:
+                fused_bev = features[0]
+
+            x = self.bevfusion.decoder["backbone"](fused_bev)
+            x = self.bevfusion.decoder["neck"](x)
+
+            # Call the object head's forward() directly (NOT get_bboxes) so we
+            # keep the raw dense_heatmap instead of final decoded 3D boxes.
+            pred_dicts = self.bevfusion.heads["object"](x, inputs["metas"])
+            pred_dict = pred_dicts[0]
+
+            dense_heatmap = pred_dict["dense_heatmap"]        # (B, num_classes, H, W), pre-sigmoid
+            heatmap = torch.sigmoid(dense_heatmap)
+
+            return {
+                "fused_bev":  fused_bev,
+                "heatmap":    heatmap,
+                "regression": None,  # sparse-only in TransFusion; see docstring
+            }
+        
     # ── Public interface ──────────────────────────────────────────────────────
 
     @torch.no_grad()

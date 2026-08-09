@@ -15,6 +15,9 @@ Where:
     L_logit    — KL divergence between student and teacher heatmap logits
                  with temperature scaling T (soft label distillation)
                + L1 loss between student and teacher regression outputs
+                 (regression term is skipped, falling back to heatmap-only
+                 KL, when the teacher has no dense regression output — e.g.
+                 real BEVFusion's query-based TransFusion head)
 
     L_task     — standard detection loss from train_baseline.py
                  (focal loss on heatmaps + L1 on regression)
@@ -31,6 +34,7 @@ Reference:
     Hinton et al., "Distilling the Knowledge in a Neural Network", 2015
     Liu et al., "BEVFusion: Multi-Task Multi-Sensor Fusion...", ICRA 2023
 """
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -125,6 +129,40 @@ class LogitDistillationLoss(nn.Module):
     def __init__(self, temperature: float = 4.0):
         super().__init__()
         self.T = temperature
+
+    def heatmap_only(
+        self,
+        student_heatmap: torch.Tensor,
+        teacher_heatmap: torch.Tensor,
+    ) -> torch.Tensor:
+        """KL-divergence heatmap distillation only, for teachers (like real
+        BEVFusion/TransFusion) where dense box regression isn't available —
+        only their dense classification heatmap can be distilled.
+
+        Reuses the exact same KL computation as forward(), just without the
+        regression-L1 portion.
+        """
+        B, C, H, W = student_heatmap.shape
+        teacher_hm_ds = F.interpolate(
+            teacher_heatmap.detach(), size=(H, W),
+            mode="bilinear", align_corners=False,
+        )
+
+        eps = 1e-6
+        student_logits = torch.log(
+            student_heatmap.clamp(eps, 1-eps) / (1 - student_heatmap.clamp(eps, 1-eps))
+        )
+        teacher_logits = torch.log(
+            teacher_hm_ds.clamp(eps, 1-eps) / (1 - teacher_hm_ds.clamp(eps, 1-eps))
+        )
+
+        s_flat = (student_logits / self.T).reshape(B, -1)
+        t_flat = (teacher_logits / self.T).reshape(B, -1)
+        s_soft = F.log_softmax(s_flat, dim=-1)
+        t_soft = F.softmax(t_flat, dim=-1)
+
+        loss_hm = F.kl_div(s_soft, t_soft, reduction="batchmean") * (self.T ** 2)
+        return loss_hm    
 
     def forward(
         self,
@@ -242,7 +280,7 @@ class CombinedKDLoss(nn.Module):
         student_regression: torch.Tensor,   # (B, 8,   50, 50)
         teacher_fused:      torch.Tensor,   # (B, 256, 128, 128)
         teacher_heatmap:    torch.Tensor,   # (B, 10,  128, 128)
-        teacher_regression: torch.Tensor,   # (B, 8,   128, 128)
+        teacher_regression: Optional[torch.Tensor] = None,   # (B, 8,   128, 128)
     ) -> dict:
         """
         Returns dict with all loss components for logging:
@@ -252,11 +290,19 @@ class CombinedKDLoss(nn.Module):
         # Feature-level distillation
         loss_feature = self.feature_loss(student_fused, teacher_fused)
 
-        # Logit-level distillation
-        loss_hm_kl, loss_reg_l1 = self.logit_loss(
-            student_heatmap, teacher_heatmap,
-            student_regression, teacher_regression,
-        )
+        # Logit-level distillation. Real BEVFusion/TransFusion teacher only
+        # exposes a dense classification heatmap (no dense box regression,
+        # since TransFusion decodes boxes per-query, not per-grid-cell) —
+        # fall back to heatmap-only KL in that case.
+        if teacher_regression is not None:
+            loss_hm_kl, loss_reg_l1 = self.logit_loss(
+                student_heatmap, teacher_heatmap,
+                student_regression, teacher_regression,
+            )
+        else:
+            loss_hm_kl = self.logit_loss.heatmap_only(student_heatmap, teacher_heatmap)
+            loss_reg_l1 = torch.tensor(0.0, device=student_heatmap.device, requires_grad=True)
+
         loss_logit = loss_hm_kl + loss_reg_l1
 
         # Combined KD loss (task loss added externally)
@@ -298,3 +344,11 @@ if __name__ == "__main__":
     print("✅ Gradients flow through KD loss")
     assert s_fused.grad is not None
     print("✅ CombinedKDLoss ready")
+
+    print("\nTesting CombinedKDLoss with teacher_regression=None (real-teacher path)...")
+    losses_none_reg = kd_loss(s_fused, s_hm, s_reg, t_fused, t_hm, teacher_regression=None)
+    print("Loss components:")
+    for k, v in losses_none_reg.items():
+        print(f"  {k:<20} {v.item():.4f}")
+    losses_none_reg["loss_kd_total"].backward()
+    print("✅ Gradients flow through KD loss (None-regression path)")
