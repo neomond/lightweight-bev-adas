@@ -51,43 +51,6 @@ from src.utils.device import get_device
 
 
 # ── Loss Functions ────────────────────────────────────────────────────────────
-
-# class FocalLoss(nn.Module):
-#     """Focal loss for dense object detection heatmaps.
-
-#     Focal loss down-weights easy negatives so the model focuses on
-#     hard examples and rare foreground cells. Standard in CenterPoint-style
-#     3D detectors (Zhou et al., 2019).
-
-#     L_focal = -α(1-p)^γ * log(p)  for positives
-#             = -(1-α) * p^γ * log(1-p)  for negatives
-#     """
-
-#     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
-#         super().__init__()
-#         self.alpha = alpha
-#         self.gamma = gamma
-
-#     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-#         """
-#         Args:
-#             pred:   (B, C, H, W)  sigmoid-activated heatmap predictions
-#             target: (B, C, H, W)  binary ground-truth heatmaps in [0,1]
-#         Returns:
-#             Scalar loss
-#         """
-#         pred = pred.clamp(1e-6, 1 - 1e-6)
-
-#         pos_mask = target.eq(1).float()
-#         neg_mask = target.lt(1).float()
-
-#         pos_loss = -self.alpha * (1 - pred).pow(self.gamma) * torch.log(pred) * pos_mask
-#         neg_loss = -(1 - self.alpha) * pred.pow(self.gamma) * torch.log(1 - pred) * neg_mask
-
-#         n_pos = pos_mask.sum().clamp(min=1)
-#         loss = (pos_loss + neg_loss).sum() / n_pos
-#         return loss
-
 class FocalLoss(nn.Module):
     class_weights: Optional[torch.Tensor]
 
@@ -500,28 +463,25 @@ def main():
     history = []
 
     if args.resume and Path(args.resume).exists():
-        print(f"Resuming from checkpoint: {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
-        if "optim_state" in ckpt:
-            optimizer.load_state_dict(ckpt["optim_state"])
+        optimizer.load_state_dict(ckpt["optim_state"])
         start_epoch = ckpt["epoch"] + 1
-        for _ in range(ckpt["epoch"]):
-            scheduler.step()
 
-        # IMPORTANT: read the TRUE best val_loss from _best.pth, not from
-        # the resumed _latest.pth checkpoint — otherwise "best" tracking
-        # incorrectly resets to the latest epoch's loss on every resume,
-        # which can let a worse checkpoint overwrite a genuinely better one.
+        # Read the TRUE best val_loss from _best.pth, not from the resumed
+        # _latest.pth checkpoint — otherwise "best" tracking incorrectly
+        # resets to the latest epoch's loss on every resume, which can let
+        # a worse checkpoint overwrite a genuinely better one. Same fix
+        # applied to train_baseline.py earlier.
         best_ckpt_path = Path(args.resume).parent / f"{args.run_name}_best.pth"
         if best_ckpt_path.exists():
             best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
-            best_val_loss = best_ckpt.get("val_loss", float("inf"))
+            best_val = best_ckpt.get("val_loss", float("inf"))
         else:
-            best_val_loss = ckpt.get("val_loss", float("inf"))
+            best_val = ckpt.get("val_loss", float("inf"))
 
-        print(f"  Resumed at epoch {ckpt['epoch']}  (latest val_loss: {ckpt.get('val_loss', float('nan')):.4f})")
-        print(f"  True best val_loss so far: {best_val_loss:.4f}")
+        print(f"Resumed from epoch {ckpt['epoch']}  (latest val_loss: {ckpt.get('val_loss', float('nan')):.4f})")
+        print(f"True best val_loss so far: {best_val:.4f}\n")
         print(f"  Continuing from epoch {start_epoch}\n")
 
     # ── Logging & Checkpointing ───────────────────────────────────────────
