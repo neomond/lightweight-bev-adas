@@ -433,7 +433,7 @@ def main():
     # ── Load model ─────────────────────────────────────────────────────────
     model = StudentBEV(config['model']).to(device)
 
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
 
