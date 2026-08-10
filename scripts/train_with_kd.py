@@ -340,6 +340,8 @@ def main():
                         help="Use live mock teacher instead of cache (development)")
     parser.add_argument("--real-teacher", action="store_true",
                         help="Use live real BEVFusion teacher (RunPod only, requires mmdet3d)")
+    parser.add_argument("--use-class-weights", action="store_true",
+                        help="Apply per-class weights to FocalLoss (from checkpoints/class_weights.pt)")
     parser.add_argument("--bevfusion-checkpoint", default="/workspace/bevfusion/pretrained/bevfusion-det.pth",
                         help="Path to BEVFusion checkpoint (only used with --real-teacher)")
     parser.add_argument("--resume",       default=None,
@@ -445,7 +447,16 @@ def main():
     print()
 
     # ── Loss functions ────────────────────────────────────────────────────
-    focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0)
+    class_weights = None
+    if args.use_class_weights:
+        weights_path = Path("checkpoints/class_weights.pt")
+        if weights_path.exists():
+            class_weights = torch.load(weights_path, map_location=device)
+            print(f"Using class weights: {class_weights.tolist()}")
+        else:
+            print("WARNING: --use-class-weights set but checkpoints/class_weights.pt not found!")
+    focal_loss_fn = FocalLoss(alpha=0.25, gamma=2.0, class_weights=class_weights)
+    
     kd_loss_fn = CombinedKDLoss(
         alpha=dist_cfg.get("alpha", 1.0),
         beta=dist_cfg.get("beta",  0.5),
