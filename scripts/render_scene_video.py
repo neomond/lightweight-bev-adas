@@ -193,12 +193,26 @@ def compute_bev_maps(points, x_range=(-50, 50), y_range=(-50, 50), grid=250):
     return height_map, intensity_map, density_map
 
 
-def render_frame(nusc, sample_token, x_range=(-50, 50), y_range=(-50, 50)):
-    """Render one combined camera-mosaic + BEV frame, return as an RGB array."""
+def render_frame(nusc, sample_token, x_range=(-50, 50), y_range=(-50, 50),
+                  show_annotated_bev=True):
+    """Render one combined camera-mosaic (+ optional annotated BEV) + LiDAR
+    height/intensity/density frame, return as an RGB array.
+
+    show_annotated_bev=False drops the ground-truth-boxes BEV panel and its
+    legend entirely, leaving only raw sensor input: cameras + LiDAR maps.
+    """
     sample = nusc.get('sample', sample_token)
 
-    fig = plt.figure(figsize=(14, 16), facecolor='#0D1117', dpi=150)
-    gs = GridSpec(4, 3, figure=fig, height_ratios=[1, 1, 2.0, 1.15], hspace=0.18, wspace=0.05)
+    if show_annotated_bev:
+        fig = plt.figure(figsize=(14, 16), facecolor='#0D1117', dpi=150)
+        gs = GridSpec(4, 3, figure=fig, height_ratios=[1, 1, 2.0, 1.15],
+                      hspace=0.18, wspace=0.05)
+        maps_row = 3
+    else:
+        fig = plt.figure(figsize=(14, 11), facecolor='#0D1117', dpi=150)
+        gs = GridSpec(3, 3, figure=fig, height_ratios=[1, 1, 1.15],
+                      hspace=0.18, wspace=0.05)
+        maps_row = 2
 
     # ── camera mosaic (top 2 rows) ──────────────────────────────────────────
     for r, row in enumerate(CAMERA_LAYOUT):
@@ -210,69 +224,73 @@ def render_frame(nusc, sample_token, x_range=(-50, 50), y_range=(-50, 50)):
             ax.set_title(cam, color='#AAAAAA', fontsize=11)
             ax.axis('off')
 
-    # ── BEV panel (main plot, 2 cols) + dedicated legend panel (1 col) ───────
-    ax = fig.add_subplot(gs[2, 0:2])
-    ax.set_facecolor('#0D1117')
-
+    # LiDAR points are needed either way (for the maps row); annotations are
+    # only needed for the optional boxes-on-BEV panel.
     points = load_lidar_bev(nusc, sample, x_range, y_range)
-    annotations = get_annotations(nusc, sample)
 
-    H, W = 500, 500
-    bev = np.zeros((H, W), dtype=np.float32)
-    px = ((points[:, 0] - x_range[0]) / (x_range[1] - x_range[0]) * W).astype(int)
-    py = ((points[:, 1] - y_range[0]) / (y_range[1] - y_range[0]) * H).astype(int)
-    valid = (px >= 0) & (px < W) & (py >= 0) & (py < H)
-    np.add.at(bev, (py[valid], px[valid]), 1)
-    bev = np.log1p(bev)
-    bev = bev / bev.max() if bev.max() > 0 else bev
-    ax.imshow(bev, origin='lower', extent=(*x_range, *y_range), cmap='Greys', alpha=0.35)
+    if show_annotated_bev:
+        # ── BEV panel (main plot, 2 cols) + dedicated legend panel (1 col) ──
+        ax = fig.add_subplot(gs[2, 0:2])
+        ax.set_facecolor('#0D1117')
 
-    for r in [10, 20, 30, 40, 50]:
-        ax.add_patch(Circle((0, 0), r, color='#FFFFFF', fill=False,
-                             linestyle='--', linewidth=0.4, alpha=0.2))
+        annotations = get_annotations(nusc, sample)
 
-    for ann in annotations:
-        colour = COLOURS.get(ann['cls'], '#FFFFFF')
-        draw_rotated_box(ax, ann['x'], ann['y'], ann['w'], ann['l'], ann['yaw'], colour)
+        H, W = 500, 500
+        bev = np.zeros((H, W), dtype=np.float32)
+        px = ((points[:, 0] - x_range[0]) / (x_range[1] - x_range[0]) * W).astype(int)
+        py = ((points[:, 1] - y_range[0]) / (y_range[1] - y_range[0]) * H).astype(int)
+        valid = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        np.add.at(bev, (py[valid], px[valid]), 1)
+        bev = np.log1p(bev)
+        bev = bev / bev.max() if bev.max() > 0 else bev
+        ax.imshow(bev, origin='lower', extent=(*x_range, *y_range), cmap='Greys', alpha=0.35)
 
-    ego_box = mpatches.FancyBboxPatch((-1.0, -2.2), 2.0, 4.4, boxstyle='round,pad=0.1',
-                                       edgecolor='#F1C40F', facecolor='#F1C40F',
-                                       alpha=0.9, linewidth=2, zorder=10)
-    ax.add_patch(ego_box)
-    ax.annotate('', xy=(6, 0), xytext=(2.5, 0),
-                arrowprops=dict(arrowstyle='->', color='#F1C40F', lw=2.0, mutation_scale=15))
+        for r in [10, 20, 30, 40, 50]:
+            ax.add_patch(Circle((0, 0), r, color='#FFFFFF', fill=False,
+                                 linestyle='--', linewidth=0.4, alpha=0.2))
 
-    ax.set_xlim(x_range)
-    ax.set_ylim(y_range)
-    ax.set_aspect('equal')
-    ax.tick_params(colors='#AAAAAA', labelsize=10)
-    for spine in ax.spines.values():
-        spine.set_edgecolor('#4A5568')
-    ax.set_title(f'BEV — {len(annotations)} objects  ·  token {sample_token[:8]}',
-                 color='white', fontsize=13)
+        for ann in annotations:
+            colour = COLOURS.get(ann['cls'], '#FFFFFF')
+            draw_rotated_box(ax, ann['x'], ann['y'], ann['w'], ann['l'], ann['yaw'], colour)
 
-    # ── legend panel — fixed, all 10 classes, so color mapping stays
-    #    consistent across every frame regardless of what's present ─────────
-    lax = fig.add_subplot(gs[2, 2])
-    lax.set_facecolor('#0D1117')
-    lax.axis('off')
-    legend_handles = [mpatches.Patch(facecolor='#F1C40F', edgecolor='#F1C40F',
-                                      alpha=0.9, label='Ego vehicle')]
-    for cls in CLASS_ABBREV:
-        legend_handles.append(mpatches.Patch(
-            facecolor=COLOURS[cls], edgecolor=COLOURS[cls],
-            alpha=0.85, label=CLASS_ABBREV[cls],
-        ))
-    legend = lax.legend(
-        handles=legend_handles, loc='center left', frameon=True,
-        framealpha=0.9, facecolor='#1A1F2E', edgecolor='#4A5568',
-        labelcolor='white', fontsize=13, title='Detected Objects',
-        title_fontsize=15, borderaxespad=0, handlelength=2.0,
-        handleheight=1.4, labelspacing=0.9,
-    )
-    legend.get_title().set_color('white')
+        ego_box = mpatches.FancyBboxPatch((-1.0, -2.2), 2.0, 4.4, boxstyle='round,pad=0.1',
+                                           edgecolor='#F1C40F', facecolor='#F1C40F',
+                                           alpha=0.9, linewidth=2, zorder=10)
+        ax.add_patch(ego_box)
+        ax.annotate('', xy=(6, 0), xytext=(2.5, 0),
+                    arrowprops=dict(arrowstyle='->', color='#F1C40F', lw=2.0, mutation_scale=15))
 
-    # ── height / intensity / density maps (row 4) ────────────────────────────
+        ax.set_xlim(x_range)
+        ax.set_ylim(y_range)
+        ax.set_aspect('equal')
+        ax.tick_params(colors='#AAAAAA', labelsize=10)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#4A5568')
+        ax.set_title(f'BEV — {len(annotations)} objects  ·  token {sample_token[:8]}',
+                     color='white', fontsize=13)
+
+        # ── legend panel — fixed, all 10 classes, so color mapping stays
+        #    consistent across every frame regardless of what's present ────
+        lax = fig.add_subplot(gs[2, 2])
+        lax.set_facecolor('#0D1117')
+        lax.axis('off')
+        legend_handles = [mpatches.Patch(facecolor='#F1C40F', edgecolor='#F1C40F',
+                                          alpha=0.9, label='Ego vehicle')]
+        for cls in CLASS_ABBREV:
+            legend_handles.append(mpatches.Patch(
+                facecolor=COLOURS[cls], edgecolor=COLOURS[cls],
+                alpha=0.85, label=CLASS_ABBREV[cls],
+            ))
+        legend = lax.legend(
+            handles=legend_handles, loc='center left', frameon=True,
+            framealpha=0.9, facecolor='#1A1F2E', edgecolor='#4A5568',
+            labelcolor='white', fontsize=13, title='Detected Objects',
+            title_fontsize=15, borderaxespad=0, handlelength=2.0,
+            handleheight=1.4, labelspacing=0.9,
+        )
+        legend.get_title().set_color('white')
+
+    # ── height / intensity / density maps ────────────────────────────────────
     height_map, intensity_map, density_map = compute_bev_maps(points, x_range, y_range)
 
     map_specs = [
@@ -281,7 +299,7 @@ def render_frame(nusc, sample_token, x_range=(-50, 50), y_range=(-50, 50)):
         (density_map, 'magma', 'BEV density map', 'log(count+1)'),
     ]
     for col, (data, cmap, title, cbar_label) in enumerate(map_specs):
-        mx = fig.add_subplot(gs[3, col])
+        mx = fig.add_subplot(gs[maps_row, col])
         mx.set_facecolor('#0D1117')
         im = mx.imshow(
             np.ma.masked_invalid(data), origin='lower',
@@ -326,6 +344,10 @@ def main():
                               'to speed up playback, not add real frames')
     parser.add_argument('--max-frames', type=int, default=None)
     parser.add_argument('--list-scenes', action='store_true')
+    parser.add_argument('--hide-annotated-bev', action='store_true',
+                         help='Drop the ground-truth-boxes BEV panel and its legend, '
+                              'leaving only raw sensor input: cameras + LiDAR height/'
+                              'intensity/density maps.')
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -350,13 +372,14 @@ def main():
     tokens = get_scene_tokens(nusc, scene)
     if args.max_frames:
         tokens = tokens[: args.max_frames]
-    print(f"Rendering scene '{scene['name']}' — {len(tokens)} keyframes")
+    print(f"Rendering scene '{scene['name']}' — {len(tokens)} keyframes"
+          f"{' (no annotations — camera + LiDAR only)' if args.hide_annotated_bev else ''}")
 
     import imageio
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     writer = imageio.get_writer(args.output, fps=args.fps, macro_block_size=None)
     for i, token in enumerate(tokens):
-        frame = render_frame(nusc, token)
+        frame = render_frame(nusc, token, show_annotated_bev=not args.hide_annotated_bev)
         writer.append_data(frame)
         print(f'  frame {i + 1}/{len(tokens)}')
     writer.close()

@@ -47,21 +47,17 @@ python -m src.losses.distillation
 
 ## Architecture
 
-```
-Camera Images → YOLO11 Backbone → Camera-to-BEV
-                                          ↘
-                                    Fusion Module (KD here) → BEV → 3D Detection
-                                          ↗
-LiDAR Points  → PointPillars    → LiDAR-to-BEV
+<p align="center">
+  <img src="outputs/student_architecture.png" width="100%" alt="Student architecture and training pipeline diagram"/>
+</p>
 
-Teacher: BEVFusion (frozen, provides supervision)
-```
+*Camera images pass through a YOLO11 backbone and Lift-Splat-Shoot view transformer into BEV space; LiDAR points pass through PointPillars into a LiDAR BEV feature map. Both are fused via channel-wise fusion and decoded by the BEV detection head. During training, the frozen BEVFusion teacher (~100M params) supervises the fusion stage via knowledge distillation — the student network totals ~5.5M parameters, 18× smaller than the teacher.*
 
-## Milestones
 
-- M1: Environment & data loading (Wk 1-2)
-- M2: YOLO backbone features (Wk 3-4)
-- M3: PointPillars + fusion baseline (Wk 5-7)
-- M4: Knowledge distillation (Wk 8-12)
-- M5: Evaluation & ablations (Wk 13-16)
-- M6: Dissertation writing (Wk 16-20)
+## Results
+
+| Sensor Inputs & BEV Feature Maps | Fused Detection Output |
+|:---:|:---:|
+| ![Sensor inputs](outputs/bev_sensor_inputs.png) | ![Detection output](outputs/bev_detection_output.png) |
+
+*Left: 6-camera surround view with BEV height/intensity/density maps from LiDAR. Right: fused BEV detections (68 objects, 10 classes) from the 5.5M-param student model.*
